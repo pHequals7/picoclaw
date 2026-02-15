@@ -73,7 +73,7 @@ func (p *HTTPProvider) Chat(ctx context.Context, messages []Message, tools []Too
 
 	if maxTokens, ok := options["max_tokens"].(int); ok {
 		lowerModel := strings.ToLower(model)
-		if strings.Contains(lowerModel, "glm") || strings.Contains(lowerModel, "o1") {
+		if strings.Contains(lowerModel, "glm") || strings.Contains(lowerModel, "o1") || strings.Contains(lowerModel, "gpt") {
 			requestBody["max_completion_tokens"] = maxTokens
 		} else {
 			requestBody["max_tokens"] = maxTokens
@@ -82,8 +82,8 @@ func (p *HTTPProvider) Chat(ctx context.Context, messages []Message, tools []Too
 
 	if temperature, ok := options["temperature"].(float64); ok {
 		lowerModel := strings.ToLower(model)
-		// Kimi k2 models only support temperature=1
-		if strings.Contains(lowerModel, "kimi") && strings.Contains(lowerModel, "k2") {
+		// Kimi k2 and GPT-5 mini models only support temperature=1
+		if (strings.Contains(lowerModel, "kimi") && strings.Contains(lowerModel, "k2")) || strings.Contains(lowerModel, "gpt-5-mini") {
 			requestBody["temperature"] = 1.0
 		} else {
 			requestBody["temperature"] = temperature
