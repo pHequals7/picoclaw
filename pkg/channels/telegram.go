@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -137,6 +138,20 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) err
 		c.stopThinking.Delete(msg.ChatID)
 	}
 
+	// If media files are attached, send them
+	if len(msg.Media) > 0 {
+		// Delete placeholder if present
+		if pID, ok := c.placeholders.Load(msg.ChatID); ok {
+			c.placeholders.Delete(msg.ChatID)
+			c.bot.DeleteMessage(ctx, &telego.DeleteMessageParams{
+				ChatID:    tu.ID(chatID),
+				MessageID: pID.(int),
+			})
+		}
+
+		return c.sendMediaFiles(ctx, chatID, msg.Content, msg.Media)
+	}
+
 	htmlContent := markdownToTelegramHTML(msg.Content)
 
 	// Try to edit placeholder
@@ -161,6 +176,66 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) err
 		tgMsg.ParseMode = ""
 		_, err = c.bot.SendMessage(ctx, tgMsg)
 		return err
+	}
+
+	return nil
+}
+
+// sendMediaFiles sends local files via Telegram, choosing the appropriate method by extension.
+func (c *TelegramChannel) sendMediaFiles(ctx context.Context, chatID int64, caption string, files []string) error {
+	for i, filePath := range files {
+		f, err := os.Open(filePath)
+		if err != nil {
+			logger.ErrorCF("telegram", "Failed to open file for sending", map[string]interface{}{
+				"path":  filePath,
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		// Only set caption on the first file
+		fileCaption := ""
+		if i == 0 && caption != "" {
+			fileCaption = caption
+		}
+
+		ext := strings.ToLower(filepath.Ext(filePath))
+
+		switch {
+		case ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp":
+			params := tu.Photo(tu.ID(chatID), tu.File(f))
+			params.Caption = fileCaption
+			_, err = c.bot.SendPhoto(ctx, params)
+
+		case ext == ".mp4" || ext == ".mov" || ext == ".avi" || ext == ".mkv":
+			params := tu.Video(tu.ID(chatID), tu.File(f))
+			params.Caption = fileCaption
+			_, err = c.bot.SendVideo(ctx, params)
+
+		case ext == ".mp3" || ext == ".ogg" || ext == ".wav" || ext == ".m4a" || ext == ".flac":
+			params := tu.Audio(tu.ID(chatID), tu.File(f))
+			params.Caption = fileCaption
+			_, err = c.bot.SendAudio(ctx, params)
+
+		default:
+			params := tu.Document(tu.ID(chatID), tu.File(f))
+			params.Caption = fileCaption
+			_, err = c.bot.SendDocument(ctx, params)
+		}
+
+		f.Close()
+
+		if err != nil {
+			logger.ErrorCF("telegram", "Failed to send file", map[string]interface{}{
+				"path":  filePath,
+				"error": err.Error(),
+			})
+			return fmt.Errorf("failed to send file %s: %w", filepath.Base(filePath), err)
+		}
+
+		logger.InfoCF("telegram", "File sent successfully", map[string]interface{}{
+			"path": filePath,
+		})
 	}
 
 	return nil

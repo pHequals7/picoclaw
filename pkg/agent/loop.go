@@ -99,12 +99,26 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	})
 	registry.Register(messageTool)
 
+	// Send file tool - allows agent to send files to user
+	sendFileTool := tools.NewSendFileTool(workspace)
+	sendFileTool.SetSendCallback(func(channel, chatID, caption string, files []string) error {
+		msgBus.PublishOutbound(bus.OutboundMessage{
+			Channel: channel,
+			ChatID:  chatID,
+			Content: caption,
+			Media:   files,
+		})
+		return nil
+	})
+	registry.Register(sendFileTool)
+
 	return registry
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
 	workspace := cfg.WorkspacePath()
 	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(filepath.Join(workspace, "downloads"), 0755)
 
 	restrict := cfg.Agents.Defaults.RestrictToWorkspace
 
@@ -596,6 +610,11 @@ func (al *AgentLoop) updateToolContexts(channel, chatID string) {
 	if tool, ok := al.tools.Get("subagent"); ok {
 		if st, ok := tool.(tools.ContextualTool); ok {
 			st.SetContext(channel, chatID)
+		}
+	}
+	if tool, ok := al.tools.Get("send_file"); ok {
+		if sf, ok := tool.(tools.ContextualTool); ok {
+			sf.SetContext(channel, chatID)
 		}
 	}
 }
