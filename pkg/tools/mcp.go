@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,19 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sipeed/picoclaw/pkg/config"
 )
+
+// headerRoundTripper injects custom headers into HTTP requests.
+type headerRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, v := range h.headers {
+		req.Header.Set(k, v)
+	}
+	return h.base.RoundTrip(req)
+}
 
 const (
 	defaultMCPStartupTimeout = 8 * time.Second
@@ -211,17 +225,35 @@ func (c *mcpClient) buildTransport() (mcp.Transport, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &mcp.StreamableClientTransport{
+		t := &mcp.StreamableClientTransport{
 			Endpoint: endpoint,
-		}, nil
+		}
+		if len(c.cfg.Headers) > 0 {
+			t.HTTPClient = &http.Client{
+				Transport: &headerRoundTripper{
+					base:    http.DefaultTransport,
+					headers: c.cfg.Headers,
+				},
+			}
+		}
+		return t, nil
 	case "sse":
 		endpoint, err := c.requiredServerURL("sse")
 		if err != nil {
 			return nil, err
 		}
-		return &mcp.SSEClientTransport{
+		t := &mcp.SSEClientTransport{
 			Endpoint: endpoint,
-		}, nil
+		}
+		if len(c.cfg.Headers) > 0 {
+			t.HTTPClient = &http.Client{
+				Transport: &headerRoundTripper{
+					base:    http.DefaultTransport,
+					headers: c.cfg.Headers,
+				},
+			}
+		}
+		return t, nil
 	default:
 		return nil, fmt.Errorf("mcp server %q: unsupported transport %q", c.cfg.Name, c.cfg.Transport)
 	}

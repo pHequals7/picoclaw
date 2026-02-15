@@ -219,6 +219,7 @@ type MCPServerConfig struct {
 	Env                map[string]string `json:"env,omitempty"`
 	WorkingDir         string            `json:"working_dir,omitempty"`
 	URL                string            `json:"url,omitempty"`
+	Headers            map[string]string `json:"headers,omitempty"`
 	ToolPrefix         string            `json:"tool_prefix,omitempty"`
 	StartupTimeoutMS   int               `json:"startup_timeout_ms,omitempty"`
 	CallTimeoutMS      int               `json:"call_timeout_ms,omitempty"`
