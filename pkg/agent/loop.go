@@ -111,6 +111,18 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	// Create tool registry for main agent
 	toolsRegistry := createToolRegistry(workspace, restrict, cfg, msgBus)
 
+	// Register MCP-discovered tools (best effort; continue on per-server failures)
+	mcpTools, mcpErr := tools.LoadMCPTools(context.Background(), cfg.Tools.MCP, workspace)
+	if mcpErr != nil {
+		logger.WarnCF("agent", "Some MCP servers failed to load",
+			map[string]interface{}{
+				"error": mcpErr.Error(),
+			})
+	}
+	for _, tool := range mcpTools {
+		toolsRegistry.Register(tool)
+	}
+
 	// Create subagent manager with its own tool registry
 	subagentManager := tools.NewSubagentManager(provider, cfg.Agents.Defaults.Model, workspace, msgBus)
 	subagentTools := createToolRegistry(workspace, restrict, cfg, msgBus)

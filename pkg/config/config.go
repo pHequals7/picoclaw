@@ -210,8 +210,29 @@ type WebToolsConfig struct {
 	DuckDuckGo DuckDuckGoConfig `json:"duckduckgo"`
 }
 
+type MCPServerConfig struct {
+	Name               string            `json:"name"`
+	Enabled            bool              `json:"enabled"`
+	Transport          string            `json:"transport"` // command|streamable_http|sse
+	Command            string            `json:"command,omitempty"`
+	Args               []string          `json:"args,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	WorkingDir         string            `json:"working_dir,omitempty"`
+	URL                string            `json:"url,omitempty"`
+	ToolPrefix         string            `json:"tool_prefix,omitempty"`
+	StartupTimeoutMS   int               `json:"startup_timeout_ms,omitempty"`
+	CallTimeoutMS      int               `json:"call_timeout_ms,omitempty"`
+	TerminateTimeoutMS int               `json:"terminate_timeout_ms,omitempty"`
+}
+
+type MCPToolsConfig struct {
+	Enabled bool              `json:"enabled"`
+	Servers []MCPServerConfig `json:"servers"`
+}
+
 type ToolsConfig struct {
 	Web WebToolsConfig `json:"web"`
+	MCP MCPToolsConfig `json:"mcp"`
 }
 
 func DefaultConfig() *Config {
@@ -320,6 +341,10 @@ func DefaultConfig() *Config {
 					Enabled:    true,
 					MaxResults: 5,
 				},
+			},
+			MCP: MCPToolsConfig{
+				Enabled: false,
+				Servers: []MCPServerConfig{},
 			},
 		},
 		Heartbeat: HeartbeatConfig{
