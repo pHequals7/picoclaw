@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -121,6 +122,47 @@ type DownloadOptions struct {
 	LoggerPrefix string
 }
 
+var (
+	mediaCacheDirMu sync.RWMutex
+	mediaCacheDir   string
+)
+
+// SetMediaCacheDir configures where downloaded inbound media is stored.
+// If not set, DownloadFile falls back to os.TempDir()/picoclaw_media.
+func SetMediaCacheDir(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("media cache dir cannot be empty")
+	}
+
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve media cache dir: %w", err)
+	}
+
+	if err := os.MkdirAll(absDir, 0700); err != nil {
+		return fmt.Errorf("failed to create media cache dir: %w", err)
+	}
+
+	mediaCacheDirMu.Lock()
+	mediaCacheDir = absDir
+	mediaCacheDirMu.Unlock()
+
+	return nil
+}
+
+// GetMediaCacheDir returns the configured media cache directory.
+func GetMediaCacheDir() string {
+	mediaCacheDirMu.RLock()
+	dir := mediaCacheDir
+	mediaCacheDirMu.RUnlock()
+
+	if dir != "" {
+		return dir
+	}
+
+	return filepath.Join(os.TempDir(), "picoclaw_media")
+}
+
 // DownloadFile downloads a file from URL to a local temp directory.
 // Returns the local file path or empty string on error.
 func DownloadFile(url, filename string, opts DownloadOptions) string {
@@ -132,10 +174,11 @@ func DownloadFile(url, filename string, opts DownloadOptions) string {
 		opts.LoggerPrefix = "utils"
 	}
 
-	mediaDir := filepath.Join(os.TempDir(), "picoclaw_media")
+	mediaDir := GetMediaCacheDir()
 	if err := os.MkdirAll(mediaDir, 0700); err != nil {
 		logger.ErrorCF(opts.LoggerPrefix, "Failed to create media directory", map[string]interface{}{
 			"error": err.Error(),
+			"dir":   mediaDir,
 		})
 		return ""
 	}

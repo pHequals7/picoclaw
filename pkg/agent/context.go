@@ -224,13 +224,6 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 			logger.InfoCF("agent", "Attached images to message",
 				map[string]interface{}{"count": len(images)})
 		}
-		// Clean up temp media files now that they've been encoded
-		for _, p := range media {
-			if err := os.Remove(p); err != nil {
-				logger.DebugCF("agent", "Failed to remove temp media file",
-					map[string]interface{}{"path": p, "error": err.Error()})
-			}
-		}
 	}
 	messages = append(messages, currentMsg)
 

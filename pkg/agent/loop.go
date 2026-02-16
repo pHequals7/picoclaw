@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -127,6 +128,14 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	workspace := cfg.WorkspacePath()
 	os.MkdirAll(workspace, 0755)
 	os.MkdirAll(filepath.Join(workspace, "downloads"), 0755)
+	mediaCacheDir := filepath.Join(workspace, "tmp", "media")
+	if err := utils.SetMediaCacheDir(mediaCacheDir); err != nil {
+		logger.WarnCF("agent", "Failed to configure workspace media cache directory",
+			map[string]interface{}{"dir": mediaCacheDir, "error": err.Error()})
+	} else {
+		logger.InfoCF("agent", "Configured media cache directory",
+			map[string]interface{}{"dir": mediaCacheDir})
+	}
 
 	restrict := cfg.Agents.Defaults.RestrictToWorkspace
 
@@ -609,6 +618,8 @@ func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMe
 // runAgentLoop is the core message processing logic.
 // It handles context building, LLM calls, tool execution, and response handling.
 func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (string, error) {
+	defer al.cleanupTurnMedia(opts.Media)
+
 	// 0. Record last channel for heartbeat notifications (skip internal channels)
 	if opts.Channel != "" && opts.ChatID != "" {
 		// Don't record internal channels (cli, system, subagent)
@@ -685,6 +696,42 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 		})
 
 	return finalContent, nil
+}
+
+func (al *AgentLoop) cleanupTurnMedia(media []string) {
+	if len(media) == 0 {
+		return
+	}
+
+	workspaceMediaDir := filepath.Clean(filepath.Join(al.workspace, "tmp", "media"))
+	legacyTempDir := filepath.Clean(filepath.Join(os.TempDir(), "picoclaw_media"))
+
+	for _, p := range media {
+		cleanPath := filepath.Clean(p)
+		if !isPathWithin(cleanPath, workspaceMediaDir) && !isPathWithin(cleanPath, legacyTempDir) {
+			continue
+		}
+
+		if err := os.Remove(cleanPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			logger.DebugCF("agent", "Failed to remove media file after turn",
+				map[string]interface{}{"path": cleanPath, "error": err.Error()})
+			continue
+		}
+
+		logger.DebugCF("agent", "Removed media file after turn",
+			map[string]interface{}{"path": cleanPath})
+	}
+}
+
+func isPathWithin(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
 // runLLMIteration executes the LLM call loop with tool handling.
