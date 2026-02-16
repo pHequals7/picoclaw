@@ -36,6 +36,7 @@ const (
 type Action struct {
 	ID          string
 	ToolName    string
+	Args        map[string]interface{} // Tool arguments for descriptive summaries
 	Type        ActionType
 	Status      ActionStatus
 	StartTime   time.Time
@@ -82,6 +83,7 @@ func (as *ActionStream) StartAction(toolName string, args map[string]interface{}
 	action := Action{
 		ID:        actionID,
 		ToolName:  toolName,
+		Args:      args,
 		Type:      actionType,
 		Status:    ActionRunning,
 		StartTime: time.Now(),
@@ -156,38 +158,50 @@ func (as *ActionStream) formatSummary() string {
 
 	var sb strings.Builder
 
-	// Count running actions
-	running := 0
+	// Separate completed, running, and errored actions
+	var completed []Action
+	var running []Action
+	var errored []Action
 	for _, a := range as.actions {
-		if a.Status == ActionRunning {
-			running++
+		switch a.Status {
+		case ActionRunning:
+			running = append(running, a)
+		case ActionError:
+			errored = append(errored, a)
+		default:
+			completed = append(completed, a)
 		}
 	}
 
-	if running > 0 {
-		sb.WriteString("Working... 🔧\n")
-	} else {
+	// Show compact completed count (not each individual line)
+	if len(completed) > 0 {
+		sb.WriteString(fmt.Sprintf("✓ %d step%s done\n", len(completed), pluralS(len(completed))))
+	}
+
+	// Show errors briefly
+	for _, a := range errored {
+		sb.WriteString(fmt.Sprintf("✗ %s: %s\n", as.formatActionName(a), utils.Truncate(a.Error, 60)))
+	}
+
+	// Show currently running action(s) with description
+	for _, a := range running {
+		sb.WriteString(fmt.Sprintf("⏳ %s\n", as.formatActionName(a)))
+	}
+
+	// If nothing is running, we're finishing up
+	if len(running) == 0 && len(errored) == 0 {
 		sb.WriteString("Finishing up... 🔧\n")
 	}
 
-	for _, action := range as.actions {
-		icon := as.getStatusIcon(action.Status)
-		sb.WriteString(fmt.Sprintf("%s %s", icon, as.formatActionName(action)))
-
-		// Add duration if enabled and action is complete
-		if as.config.ShowDuration && action.Status != ActionRunning && action.Duration > 0 {
-			sb.WriteString(fmt.Sprintf(" (%dms)", action.Duration.Milliseconds()))
-		}
-
-		sb.WriteString("\n")
-
-		// Only show errors, not full results (keeps Telegram messages compact)
-		if action.Error != "" {
-			sb.WriteString(fmt.Sprintf("  ✗ %s\n", utils.Truncate(action.Error, 100)))
-		}
-	}
-
 	return sb.String()
+}
+
+// pluralS returns "s" if n != 1
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // getStatusIcon returns an icon for the action status
@@ -206,26 +220,156 @@ func (as *ActionStream) getStatusIcon(status ActionStatus) string {
 	}
 }
 
-// formatActionName creates a readable name for an action
+// formatActionName creates a brief, descriptive name for an action (5-7 words)
 func (as *ActionStream) formatActionName(action Action) string {
 	switch action.ToolName {
 	case "exec":
-		return "Running command"
+		return summarizeCommand(action.Args)
 	case "web_search":
-		return "Searching web"
+		if q, ok := action.Args["query"].(string); ok {
+			return fmt.Sprintf("Searching: %s", utils.Truncate(q, 30))
+		}
+		return "Searching the web"
 	case "read_file":
-		return "Reading file"
+		if p, ok := action.Args["path"].(string); ok {
+			return fmt.Sprintf("Reading %s", shortenPath(p))
+		}
+		return "Reading a file"
 	case "write_file":
-		return "Writing file"
+		if p, ok := action.Args["path"].(string); ok {
+			return fmt.Sprintf("Writing %s", shortenPath(p))
+		}
+		return "Writing a file"
 	case "list_files":
+		if p, ok := action.Args["path"].(string); ok {
+			return fmt.Sprintf("Listing %s", shortenPath(p))
+		}
 		return "Listing files"
 	case "spawn":
-		return "Spawning subagent"
+		if task, ok := action.Args["task"].(string); ok {
+			return fmt.Sprintf("Subagent: %s", utils.Truncate(task, 30))
+		}
+		return "Running subagent"
 	case "message":
 		return "Sending message"
 	default:
-		return fmt.Sprintf("Executing %s", action.ToolName)
+		return fmt.Sprintf("Running %s", action.ToolName)
 	}
+}
+
+// summarizeCommand extracts a brief description from exec args
+func summarizeCommand(args map[string]interface{}) string {
+	cmd, ok := args["command"].(string)
+	if !ok || cmd == "" {
+		return "Running command"
+	}
+
+	// Trim and get the first meaningful token(s)
+	cmd = strings.TrimSpace(cmd)
+
+	// If it's a piped/chained command, just describe the first part
+	for _, sep := range []string{" | ", " && ", " ; "} {
+		if idx := strings.Index(cmd, sep); idx > 0 {
+			cmd = cmd[:idx]
+			break
+		}
+	}
+
+	// Extract the base command name
+	parts := strings.Fields(cmd)
+	if len(parts) == 0 {
+		return "Running command"
+	}
+	base := parts[0]
+
+	// Map common commands to brief descriptions
+	switch base {
+	case "ls", "dir":
+		return "Listing directory contents"
+	case "cd":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Changing to %s", shortenPath(parts[1]))
+		}
+		return "Changing directory"
+	case "cat", "head", "tail", "less":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Reading %s", shortenPath(parts[len(parts)-1]))
+		}
+		return "Reading file contents"
+	case "mkdir":
+		return "Creating directory"
+	case "rm":
+		return "Removing files"
+	case "cp":
+		return "Copying files"
+	case "mv":
+		return "Moving files"
+	case "git":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Git %s", parts[1])
+		}
+		return "Running git"
+	case "pip", "pip3":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Pip %s", parts[1])
+		}
+		return "Running pip"
+	case "npm", "yarn", "pnpm":
+		if len(parts) > 1 {
+			return fmt.Sprintf("%s %s", base, parts[1])
+		}
+		return fmt.Sprintf("Running %s", base)
+	case "make":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Make %s", parts[1])
+		}
+		return "Running make"
+	case "docker":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Docker %s", parts[1])
+		}
+		return "Running docker"
+	case "curl", "wget":
+		return "Fetching URL"
+	case "grep", "rg", "ag":
+		return "Searching file contents"
+	case "find":
+		return "Finding files"
+	case "python", "python3":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Running %s", shortenPath(parts[1]))
+		}
+		return "Running Python script"
+	case "go":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Go %s", parts[1])
+		}
+		return "Running go"
+	case "apt", "apt-get":
+		if len(parts) > 1 {
+			return fmt.Sprintf("Apt %s", parts[1])
+		}
+		return "Running apt"
+	case "sudo":
+		// Recurse without sudo
+		remaining := strings.Join(parts[1:], " ")
+		return summarizeCommand(map[string]interface{}{"command": remaining})
+	default:
+		// For unknown commands, show the command truncated
+		return fmt.Sprintf("Running: %s", utils.Truncate(strings.Join(parts[:min(len(parts), 3)], " "), 35))
+	}
+}
+
+// shortenPath returns just the filename or last path component
+func shortenPath(path string) string {
+	if path == "" {
+		return path
+	}
+	// Find last slash
+	if idx := strings.LastIndex(path, "/"); idx >= 0 && idx < len(path)-1 {
+		return path[idx+1:]
+	}
+	return path
 }
 
 // truncateResult truncates a result based on action type
