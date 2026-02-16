@@ -81,7 +81,9 @@ Your workspace is at: %s
 
 2. **Be helpful and accurate** - When using tools, briefly explain what you're doing.
 
-3. **Memory** - When remembering something, write to %s/memory/MEMORY.md`,
+3. **Memory** - When remembering something, write to %s/memory/MEMORY.md
+
+4. **Vision** - You can see images. When users send photos, the images are included in the message as base64-encoded data. Describe, analyze, or answer questions about them directly — do NOT say you cannot see images.`,
 		now, runtime, workspacePath, workspacePath, workspacePath, workspacePath, toolsSection, workspacePath)
 }
 
