@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type ContextBuilder struct {
@@ -207,10 +208,22 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 
 	messages = append(messages, history...)
 
-	messages = append(messages, providers.Message{
-		Role:    "user",
-		Content: currentMessage,
-	})
+	currentMsg := providers.Message{Role: "user", Content: currentMessage}
+	if len(media) > 0 {
+		images := utils.ProcessMediaImages(media)
+		if len(images) > 0 {
+			currentMsg.Media = make([]providers.MediaImage, len(images))
+			for i, img := range images {
+				currentMsg.Media[i] = providers.MediaImage{
+					MimeType:   img.MimeType,
+					Base64Data: img.Base64Data,
+				}
+			}
+			logger.InfoCF("agent", "Attached images to message",
+				map[string]interface{}{"count": len(images)})
+		}
+	}
+	messages = append(messages, currentMsg)
 
 	return messages
 }

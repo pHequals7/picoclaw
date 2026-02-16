@@ -92,8 +92,12 @@ func buildClaudeParams(messages []Message, tools []ToolDefinition, model string,
 					anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)),
 				)
 			} else {
+				blocks := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(msg.Content)}
+				for _, img := range msg.Media {
+					blocks = append(blocks, anthropic.NewImageBlockBase64(img.MimeType, img.Base64Data))
+				}
 				anthropicMessages = append(anthropicMessages,
-					anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)),
+					anthropic.NewUserMessage(blocks...),
 				)
 			}
 		case "assistant":

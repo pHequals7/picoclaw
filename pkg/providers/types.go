@@ -28,11 +28,17 @@ type UsageInfo struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+type MediaImage struct {
+	MimeType   string
+	Base64Data string
+}
+
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role       string       `json:"role"`
+	Content    string       `json:"content"`
+	ToolCalls  []ToolCall   `json:"tool_calls,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
+	Media      []MediaImage `json:"-"` // transient, not serialized to history
 }
 
 type LLMProvider interface {
