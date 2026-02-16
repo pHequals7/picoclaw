@@ -348,7 +348,6 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 			}
 		}
 	}()
-
 	if message.Text != "" {
 		content += message.Text
 	}
