@@ -43,6 +43,7 @@ type AgentLoop struct {
 	config         *config.Config
 	running        atomic.Bool
 	summarizing    sync.Map // Tracks which sessions are currently being summarized
+	activeCancel   sync.Map // sessionKey -> context.CancelFunc for in-flight requests
 }
 
 // processOptions configures how a message is processed
@@ -193,8 +194,43 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				continue
 			}
 
-			response, err := al.processMessage(ctx, msg)
+			// Handle /stop command: cancel the active request for this session
+			if strings.TrimSpace(msg.Content) == "/stop" {
+				sessionKey := fmt.Sprintf("%s:%s", msg.Channel, msg.ChatID)
+				if cancelFn, ok := al.activeCancel.LoadAndDelete(sessionKey); ok {
+					cancelFn.(context.CancelFunc)()
+					logger.InfoCF("agent", "Cancelled active request", map[string]interface{}{
+						"session_key": sessionKey,
+					})
+					al.bus.PublishOutbound(bus.OutboundMessage{
+						Channel: msg.Channel,
+						ChatID:  msg.ChatID,
+						Content: "Stopped.",
+					})
+				} else {
+					al.bus.PublishOutbound(bus.OutboundMessage{
+						Channel: msg.Channel,
+						ChatID:  msg.ChatID,
+						Content: "Nothing running to stop.",
+					})
+				}
+				continue
+			}
+
+			// Create a cancellable context for this request
+			msgCtx, msgCancel := context.WithCancel(ctx)
+			sessionKey := fmt.Sprintf("%s:%s", msg.Channel, msg.ChatID)
+			al.activeCancel.Store(sessionKey, msgCancel)
+
+			response, err := al.processMessage(msgCtx, msg)
+			al.activeCancel.Delete(sessionKey)
+			msgCancel() // clean up context
+
 			if err != nil {
+				if msgCtx.Err() == context.Canceled {
+					// Request was cancelled by /stop, don't send error
+					continue
+				}
 				response = fmt.Sprintf("Error processing message: %v", err)
 			}
 

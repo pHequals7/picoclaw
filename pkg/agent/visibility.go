@@ -148,14 +148,27 @@ func (as *ActionStream) ForceUpdate() {
 	}
 }
 
-// formatSummary creates a formatted summary of all actions
+// formatSummary creates a compact summary of all actions
 func (as *ActionStream) formatSummary() string {
 	if len(as.actions) == 0 {
 		return "Thinking... 💭"
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Working on your request... 🔧\n\n")
+
+	// Count running actions
+	running := 0
+	for _, a := range as.actions {
+		if a.Status == ActionRunning {
+			running++
+		}
+	}
+
+	if running > 0 {
+		sb.WriteString("Working... 🔧\n")
+	} else {
+		sb.WriteString("Finishing up... 🔧\n")
+	}
 
 	for _, action := range as.actions {
 		icon := as.getStatusIcon(action.Status)
@@ -168,14 +181,9 @@ func (as *ActionStream) formatSummary() string {
 
 		sb.WriteString("\n")
 
-		// Add result preview if available
-		if action.Result != "" {
-			sb.WriteString(fmt.Sprintf("  → %s\n", action.Result))
-		}
-
-		// Add error if present
+		// Only show errors, not full results (keeps Telegram messages compact)
 		if action.Error != "" {
-			sb.WriteString(fmt.Sprintf("  ✗ Error: %s\n", action.Error))
+			sb.WriteString(fmt.Sprintf("  ✗ %s\n", utils.Truncate(action.Error, 100)))
 		}
 	}
 
