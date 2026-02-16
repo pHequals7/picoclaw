@@ -357,7 +357,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		photo := message.Photo[len(message.Photo)-1]
 		photoPath := c.downloadPhoto(ctx, photo.FileID)
 		if photoPath != "" {
-			localFiles = append(localFiles, photoPath)
+			// Don't add to localFiles — agent cleanup handles image removal after encoding
 			mediaPaths = append(mediaPaths, photoPath)
 			if content != "" {
 				content += "\n"
