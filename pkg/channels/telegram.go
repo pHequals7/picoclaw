@@ -492,8 +492,11 @@ func (c *TelegramChannel) downloadFileWithInfo(file *telego.File, ext string) st
 	url := c.bot.FileDownloadURL(file.FilePath)
 	logger.DebugCF("telegram", "File URL", map[string]interface{}{"url": url})
 
-	// Use FilePath as filename for better identification
-	filename := file.FilePath + ext
+	// Use FilePath as filename; only append ext if FilePath has no extension
+	filename := file.FilePath
+	if filepath.Ext(filename) == "" {
+		filename += ext
+	}
 	return utils.DownloadFile(url, filename, utils.DownloadOptions{
 		LoggerPrefix: "telegram",
 	})
