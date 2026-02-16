@@ -65,7 +65,11 @@
 
 🤖 **AI-Bootstrapped**: Autonomous Go-native implementation — 95% Agent-generated core with human-in-the-loop refinement.
 
-👁️ **Multimodal Vision**: Send photos via Telegram and get vision-based responses — images are base64-encoded and passed directly to Claude and OpenAI-compatible providers.
+👁️ **Multimodal Vision**: Send photos and get vision-based responses — images are base64-encoded and passed to Claude and OpenAI-compatible providers (JPEG, PNG, GIF, WebP).
+
+🔌 **MCP Support**: Connect external tools via the [Model Context Protocol](https://modelcontextprotocol.io/) — configure MCP servers in `config.json` and they appear as native tools.
+
+🛑 **User Control**: Send `/stop` in any chat channel to cancel a running request instantly.
 
 |                               | OpenClaw      | NanoBot                  | **PicoClaw**                              |
 | ----------------------------- | ------------- | ------------------------ | ----------------------------------------- |
@@ -243,7 +247,9 @@ That's it! You have a working AI assistant in 2 minutes.
 
 Talk to your picoclaw through Telegram, Discord, DingTalk, or LINE.
 
-> **Vision support**: Send photos in Telegram and PicoClaw will describe, analyze, or answer questions about them. Supported formats: JPEG, PNG, GIF, WebP. Works with Claude and OpenAI-compatible providers.
+> **Vision support**: Send photos in any channel and PicoClaw will describe, analyze, or answer questions about them. Supported formats: JPEG, PNG, GIF, WebP. Works with Claude and OpenAI-compatible vision models.
+
+> **Cancel anytime**: Send `/stop` to immediately cancel a running request. Useful for long-running tasks or accidental prompts.
 
 | Channel      | Setup                              |
 | ------------ | ---------------------------------- |
@@ -574,6 +580,27 @@ The `restrict_to_workspace` setting applies consistently across all execution pa
 
 All paths share the same workspace restriction — there's no way to bypass the security boundary through subagents or scheduled tasks.
 
+### MCP (Model Context Protocol)
+
+Connect external tools to PicoClaw via [MCP servers](https://modelcontextprotocol.io/). Any MCP-compatible server can be added as a tool source.
+
+```json
+{
+  "tools": {
+    "mcp": [
+      {
+        "name": "my-server",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+        "headers": {}
+      }
+    ]
+  }
+}
+```
+
+MCP tools appear alongside built-in tools and are available to the agent, subagents, and heartbeat tasks.
+
 ### Heartbeat (Periodic Tasks)
 
 PicoClaw can perform periodic tasks automatically. Create a `HEARTBEAT.md` file in your workspace:
@@ -651,20 +678,44 @@ The subagent has access to tools (message, web_search, etc.) and can communicate
 * `PICOCLAW_HEARTBEAT_ENABLED=false` to disable
 * `PICOCLAW_HEARTBEAT_INTERVAL=60` to change interval
 
+### Visibility (Progress Updates)
+
+PicoClaw can show real-time progress updates in chat while processing requests (e.g., "Running command", "Searching web").
+
+```json
+{
+  "visibility": {
+    "enabled": true,
+    "verbose_mode": false,
+    "update_interval_ms": 1000,
+    "show_duration": true
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Show progress updates during tool execution |
+| `verbose_mode` | `false` | If true, shows internal tool operations too |
+| `update_interval_ms` | `1000` | Minimum time between progress updates |
+| `show_duration` | `true` | Show execution time for completed actions |
+
 ### Providers
 
 > [!NOTE]
 > Groq provides free voice transcription via Whisper. If configured, Telegram voice messages will be automatically transcribed.
 
-| Provider                   | Purpose                                 | Get API Key                                            |
-| -------------------------- | --------------------------------------- | ------------------------------------------------------ |
-| `gemini`                   | LLM (Gemini direct)                     | [aistudio.google.com](https://aistudio.google.com)     |
-| `zhipu`                    | LLM (Zhipu direct)                      | [bigmodel.cn](bigmodel.cn)                             |
-| `openrouter(To be tested)` | LLM (recommended, access to all models) | [openrouter.ai](https://openrouter.ai)                 |
-| `anthropic(To be tested)`  | LLM (Claude direct)                     | [console.anthropic.com](https://console.anthropic.com) |
-| `openai(To be tested)`     | LLM (GPT direct)                        | [platform.openai.com](https://platform.openai.com)     |
-| `deepseek(To be tested)`   | LLM (DeepSeek direct)                   | [platform.deepseek.com](https://platform.deepseek.com) |
-| `groq`                     | LLM + **Voice transcription** (Whisper) | [console.groq.com](https://console.groq.com)           |
+| Provider                   | Purpose                                    | Get API Key                                            |
+| -------------------------- | ------------------------------------------ | ------------------------------------------------------ |
+| `anthropic`                | LLM (Claude direct, **vision supported**)  | [console.anthropic.com](https://console.anthropic.com) |
+| `openai`                   | LLM (GPT direct, **vision supported**)     | [platform.openai.com](https://platform.openai.com)     |
+| `gemini`                   | LLM (Gemini direct)                        | [aistudio.google.com](https://aistudio.google.com)     |
+| `zhipu`                    | LLM (Zhipu direct)                         | [bigmodel.cn](bigmodel.cn)                             |
+| `openrouter`               | LLM (access to all models)                 | [openrouter.ai](https://openrouter.ai)                 |
+| `deepseek`                 | LLM (DeepSeek direct)                      | [platform.deepseek.com](https://platform.deepseek.com) |
+| `groq`                     | LLM + **Voice transcription** (Whisper)    | [console.groq.com](https://console.groq.com)           |
+
+> **Claude Max / Setup Token**: If you have a Claude Max subscription, you can authenticate using `picoclaw auth login --provider anthropic` with a setup token (`sk-ant-oat01-*`). No API key needed.
 
 <details>
 <summary><b>Zhipu</b></summary>
@@ -783,6 +834,12 @@ picoclaw agent -m "Hello"
 | `picoclaw status`         | Show status                   |
 | `picoclaw cron list`      | List all scheduled jobs       |
 | `picoclaw cron add ...`   | Add a scheduled job           |
+
+### In-Chat Commands
+
+| Command  | Description                                      |
+| -------- | ------------------------------------------------ |
+| `/stop`  | Cancel the currently running request              |
 
 ### Scheduled Tasks / Reminders
 
