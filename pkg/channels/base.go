@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 )
@@ -90,14 +91,18 @@ func (c *BaseChannel) HandleMessage(senderID, chatID, content string, media []st
 	// Build session key: channel:chatID
 	sessionKey := fmt.Sprintf("%s:%s", c.name, chatID)
 
+	// Generate correlation ID for request tracing: {senderID}-{chatID}-{timestamp}
+	correlationID := fmt.Sprintf("%s-%s-%d", senderID, chatID, time.Now().UnixMilli())
+
 	msg := bus.InboundMessage{
-		Channel:    c.name,
-		SenderID:   senderID,
-		ChatID:     chatID,
-		Content:    content,
-		Media:      media,
-		SessionKey: sessionKey,
-		Metadata:   metadata,
+		Channel:       c.name,
+		SenderID:      senderID,
+		ChatID:        chatID,
+		Content:       content,
+		Media:         media,
+		SessionKey:    sessionKey,
+		Metadata:      metadata,
+		CorrelationID: correlationID,
 	}
 
 	c.bus.PublishInbound(msg)

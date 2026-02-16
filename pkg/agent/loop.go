@@ -40,20 +40,23 @@ type AgentLoop struct {
 	state          *state.Manager
 	contextBuilder *ContextBuilder
 	tools          *tools.ToolRegistry
+	config         *config.Config
 	running        atomic.Bool
 	summarizing    sync.Map // Tracks which sessions are currently being summarized
 }
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string // Session identifier for history/context
-	Channel         string // Target channel for tool execution
-	ChatID          string // Target chat ID for tool execution
-	UserMessage     string // User message content (may include prefix)
-	DefaultResponse string // Response when LLM returns empty
-	EnableSummary   bool   // Whether to trigger summarization
-	SendResponse    bool   // Whether to send response via bus
-	NoHistory       bool   // If true, don't load session history (for heartbeat)
+	SessionKey      string        // Session identifier for history/context
+	Channel         string        // Target channel for tool execution
+	ChatID          string        // Target chat ID for tool execution
+	UserMessage     string        // User message content (may include prefix)
+	DefaultResponse string        // Response when LLM returns empty
+	EnableSummary   bool          // Whether to trigger summarization
+	SendResponse    bool          // Whether to send response via bus
+	NoHistory       bool          // If true, don't load session history (for heartbeat)
+	CorrelationID   string        // Correlation ID for request tracing
+	ActionStream    *ActionStream // Action stream for visibility (optional)
 }
 
 // createToolRegistry creates a tool registry with common tools.
@@ -171,6 +174,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		state:          stateManager,
 		contextBuilder: contextBuilder,
 		tools:          toolsRegistry,
+		config:         cfg,
 		summarizing:    sync.Map{},
 	}
 }
@@ -278,15 +282,31 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	}
 	logger.InfoCF("agent", fmt.Sprintf("Processing message from %s:%s: %s", msg.Channel, msg.SenderID, logContent),
 		map[string]interface{}{
-			"channel":     msg.Channel,
-			"chat_id":     msg.ChatID,
-			"sender_id":   msg.SenderID,
-			"session_key": msg.SessionKey,
+			"channel":        msg.Channel,
+			"chat_id":        msg.ChatID,
+			"sender_id":      msg.SenderID,
+			"session_key":    msg.SessionKey,
+			"correlation_id": msg.CorrelationID,
 		})
 
 	// Route system messages to processSystemMessage
 	if msg.Channel == "system" {
 		return al.processSystemMessage(ctx, msg)
+	}
+
+	// Create ActionStream for visibility if enabled
+	var actionStream *ActionStream
+	if al.config.Visibility.Enabled {
+		// Create callback to send updates via message bus
+		updateCallback := func(summary string) {
+			al.bus.PublishOutbound(bus.OutboundMessage{
+				Channel:          msg.Channel,
+				ChatID:           msg.ChatID,
+				Content:          summary,
+				IsProgressUpdate: true,
+			})
+		}
+		actionStream = NewActionStream(al.config.Visibility, updateCallback)
 	}
 
 	// Process as user message
@@ -298,6 +318,8 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
+		CorrelationID:   msg.CorrelationID,
+		ActionStream:    actionStream,
 	})
 }
 
@@ -309,8 +331,9 @@ func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMe
 
 	logger.InfoCF("agent", "Processing system message",
 		map[string]interface{}{
-			"sender_id": msg.SenderID,
-			"chat_id":   msg.ChatID,
+			"sender_id":      msg.SenderID,
+			"chat_id":        msg.ChatID,
+			"correlation_id": msg.CorrelationID,
 		})
 
 	// Parse origin channel from chat_id (format: "channel:chat_id")
@@ -425,9 +448,10 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 	responsePreview := utils.Truncate(finalContent, 120)
 	logger.InfoCF("agent", fmt.Sprintf("Response: %s", responsePreview),
 		map[string]interface{}{
-			"session_key":  opts.SessionKey,
-			"iterations":   iteration,
-			"final_length": len(finalContent),
+			"session_key":    opts.SessionKey,
+			"iterations":     iteration,
+			"final_length":   len(finalContent),
+			"correlation_id": opts.CorrelationID,
 		})
 
 	return finalContent, nil
@@ -504,9 +528,10 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 		}
 		logger.InfoCF("agent", "LLM requested tool calls",
 			map[string]interface{}{
-				"tools":     toolNames,
-				"count":     len(response.ToolCalls),
-				"iteration": iteration,
+				"tools":          toolNames,
+				"count":          len(response.ToolCalls),
+				"iteration":      iteration,
+				"correlation_id": opts.CorrelationID,
 			})
 
 		// Build assistant message with tool calls
@@ -537,9 +562,16 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			argsPreview := utils.Truncate(string(argsJSON), 200)
 			logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
 				map[string]interface{}{
-					"tool":      tc.Name,
-					"iteration": iteration,
+					"tool":           tc.Name,
+					"iteration":      iteration,
+					"correlation_id": opts.CorrelationID,
 				})
+
+			// Track action start if visibility enabled
+			var actionID string
+			if opts.ActionStream != nil {
+				actionID = opts.ActionStream.StartAction(tc.Name, tc.Arguments)
+			}
 
 			// Create async callback for tools that implement AsyncTool
 			// NOTE: Following openclaw's design, async tools do NOT send results directly to users.
@@ -558,6 +590,15 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			}
 
 			toolResult := al.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, opts.Channel, opts.ChatID, asyncCallback)
+
+			// Track action completion if visibility enabled
+			if opts.ActionStream != nil && actionID != "" {
+				resultContent := toolResult.ForUser
+				if resultContent == "" {
+					resultContent = toolResult.ForLLM
+				}
+				opts.ActionStream.CompleteAction(actionID, resultContent, toolResult.Err)
+			}
 
 			// Send ForUser content to user immediately if not Silent
 			if !toolResult.Silent && toolResult.ForUser != "" && opts.SendResponse {
@@ -589,6 +630,11 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			// Save tool result message to session
 			al.sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
 		}
+	}
+
+	// Force final update if visibility enabled
+	if opts.ActionStream != nil {
+		opts.ActionStream.ForceUpdate()
 	}
 
 	return finalContent, iteration, nil
