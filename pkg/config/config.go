@@ -44,14 +44,16 @@ func (f *FlexibleStringSlice) UnmarshalJSON(data []byte) error {
 }
 
 type Config struct {
-	Agents    AgentsConfig    `json:"agents"`
-	Channels  ChannelsConfig  `json:"channels"`
-	Providers ProvidersConfig `json:"providers"`
-	Gateway   GatewayConfig   `json:"gateway"`
-	Tools     ToolsConfig     `json:"tools"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"`
-	Devices   DevicesConfig   `json:"devices"`
-	mu        sync.RWMutex
+	Agents     AgentsConfig     `json:"agents"`
+	Channels   ChannelsConfig   `json:"channels"`
+	Providers  ProvidersConfig  `json:"providers"`
+	Gateway    GatewayConfig    `json:"gateway"`
+	Tools      ToolsConfig      `json:"tools"`
+	Heartbeat  HeartbeatConfig  `json:"heartbeat"`
+	Devices    DevicesConfig    `json:"devices"`
+	Logging    LoggingConfig    `json:"logging"`
+	Visibility VisibilityConfig `json:"visibility"`
+	mu         sync.RWMutex
 }
 
 type AgentsConfig struct {
@@ -164,6 +166,21 @@ type HeartbeatConfig struct {
 type DevicesConfig struct {
 	Enabled    bool `json:"enabled" env:"PICOCLAW_DEVICES_ENABLED"`
 	MonitorUSB bool `json:"monitor_usb" env:"PICOCLAW_DEVICES_MONITOR_USB"`
+}
+
+type LoggingConfig struct {
+	FileEnabled     bool   `json:"file_enabled" env:"PICOCLAW_LOGGING_FILE_ENABLED"`
+	FilePath        string `json:"file_path" env:"PICOCLAW_LOGGING_FILE_PATH"`
+	RotationEnabled bool   `json:"rotation_enabled" env:"PICOCLAW_LOGGING_ROTATION_ENABLED"`
+	MaxAgeDays      int    `json:"max_age_days" env:"PICOCLAW_LOGGING_MAX_AGE_DAYS"`
+	MaxSizeMB       int    `json:"max_size_mb" env:"PICOCLAW_LOGGING_MAX_SIZE_MB"`
+}
+
+type VisibilityConfig struct {
+	Enabled          bool `json:"enabled" env:"PICOCLAW_VISIBILITY_ENABLED"`
+	VerboseMode      bool `json:"verbose_mode" env:"PICOCLAW_VISIBILITY_VERBOSE_MODE"`
+	UpdateIntervalMS int  `json:"update_interval_ms" env:"PICOCLAW_VISIBILITY_UPDATE_INTERVAL_MS"`
+	ShowDuration     bool `json:"show_duration" env:"PICOCLAW_VISIBILITY_SHOW_DURATION"`
 }
 
 type ProvidersConfig struct {
@@ -355,6 +372,19 @@ func DefaultConfig() *Config {
 		Devices: DevicesConfig{
 			Enabled:    false,
 			MonitorUSB: true,
+		},
+		Logging: LoggingConfig{
+			FileEnabled:     true,
+			FilePath:        "~/.picoclaw/workspace/picoclaw.log",
+			RotationEnabled: true,
+			MaxAgeDays:      7,
+			MaxSizeMB:       50,
+		},
+		Visibility: VisibilityConfig{
+			Enabled:          true,
+			VerboseMode:      false,
+			UpdateIntervalMS: 1000,
+			ShowDuration:     true,
 		},
 	}
 }

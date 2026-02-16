@@ -154,28 +154,84 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) err
 
 	htmlContent := markdownToTelegramHTML(msg.Content)
 
-	// Try to edit placeholder
+	// Split message if it exceeds Telegram's limit
+	const telegramMaxLen = 4096
+	chunks := splitLargeMessage(htmlContent, telegramMaxLen)
+
+	// Try to edit placeholder (only for first chunk)
 	if pID, ok := c.placeholders.Load(msg.ChatID); ok {
-		c.placeholders.Delete(msg.ChatID)
-		editMsg := tu.EditMessageText(tu.ID(chatID), pID.(int), htmlContent)
+		// For progressive updates, keep the placeholder ID
+		// For final responses, delete it
+		if !msg.IsProgressUpdate {
+			c.placeholders.Delete(msg.ChatID)
+		}
+
+		firstChunk := chunks[0]
+		if len(chunks) > 1 {
+			firstChunk = fmt.Sprintf("[1/%d]\n%s", len(chunks), firstChunk)
+		}
+
+		editMsg := tu.EditMessageText(tu.ID(chatID), pID.(int), firstChunk)
 		editMsg.ParseMode = telego.ModeHTML
 
 		if _, err = c.bot.EditMessageText(ctx, editMsg); err == nil {
+			// Successfully edited, send remaining chunks if any
+			for i := 1; i < len(chunks); i++ {
+				chunkContent := fmt.Sprintf("[%d/%d]\n%s", i+1, len(chunks), chunks[i])
+				tgMsg := tu.Message(tu.ID(chatID), chunkContent)
+				tgMsg.ParseMode = telego.ModeHTML
+				if _, err := c.bot.SendMessage(ctx, tgMsg); err != nil {
+					logger.ErrorCF("telegram", "Failed to send message chunk", map[string]interface{}{
+						"chunk": i + 1,
+						"error": err.Error(),
+					})
+				}
+			}
 			return nil
 		}
 		// Fallback to new message if edit fails
-	}
-
-	tgMsg := tu.Message(tu.ID(chatID), htmlContent)
-	tgMsg.ParseMode = telego.ModeHTML
-
-	if _, err = c.bot.SendMessage(ctx, tgMsg); err != nil {
-		logger.ErrorCF("telegram", "HTML parse failed, falling back to plain text", map[string]interface{}{
+		logger.WarnCF("telegram", "Failed to edit placeholder, sending new message", map[string]interface{}{
 			"error": err.Error(),
 		})
-		tgMsg.ParseMode = ""
-		_, err = c.bot.SendMessage(ctx, tgMsg)
-		return err
+	}
+
+	// Send new message(s) - either no placeholder or edit failed
+	var sentMsg *telego.Message
+	for i, chunk := range chunks {
+		chunkContent := chunk
+		if len(chunks) > 1 {
+			chunkContent = fmt.Sprintf("[%d/%d]\n%s", i+1, len(chunks), chunk)
+		}
+
+		tgMsg := tu.Message(tu.ID(chatID), chunkContent)
+		tgMsg.ParseMode = telego.ModeHTML
+
+		sent, err := c.bot.SendMessage(ctx, tgMsg)
+		if err != nil {
+			logger.ErrorCF("telegram", "HTML parse failed, falling back to plain text", map[string]interface{}{
+				"chunk": i + 1,
+				"error": err.Error(),
+			})
+			tgMsg.ParseMode = ""
+			sent, err = c.bot.SendMessage(ctx, tgMsg)
+			if err != nil {
+				logger.ErrorCF("telegram", "Failed to send message chunk", map[string]interface{}{
+					"chunk": i + 1,
+					"error": err.Error(),
+				})
+				continue
+			}
+		}
+
+		// Store the first sent message for progressive updates
+		if i == 0 {
+			sentMsg = sent
+		}
+	}
+
+	// If this is a progressive update, store the message ID as the new placeholder
+	if msg.IsProgressUpdate && sentMsg != nil {
+		c.placeholders.Store(msg.ChatID, sentMsg.MessageID)
 	}
 
 	return nil
@@ -459,6 +515,36 @@ func parseChatID(chatIDStr string) (int64, error) {
 	var id int64
 	_, err := fmt.Sscanf(chatIDStr, "%d", &id)
 	return id, err
+}
+
+// splitLargeMessage splits a message into chunks if it exceeds Telegram's limit
+func splitLargeMessage(content string, maxLen int) []string {
+	if len(content) <= maxLen {
+		return []string{content}
+	}
+
+	var chunks []string
+	remaining := content
+
+	for len(remaining) > 0 {
+		chunkSize := maxLen
+		if len(remaining) < chunkSize {
+			chunkSize = len(remaining)
+		}
+
+		// Try to break at a newline near the limit
+		if chunkSize == maxLen {
+			lastNewline := strings.LastIndex(remaining[:chunkSize], "\n")
+			if lastNewline > maxLen*2/3 { // Only if newline is in the last third
+				chunkSize = lastNewline + 1
+			}
+		}
+
+		chunks = append(chunks, remaining[:chunkSize])
+		remaining = remaining[chunkSize:]
+	}
+
+	return chunks
 }
 
 func markdownToTelegramHTML(text string) string {

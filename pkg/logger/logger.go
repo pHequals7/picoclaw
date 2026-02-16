@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -37,7 +38,14 @@ var (
 )
 
 type Logger struct {
-	file *os.File
+	file             *os.File
+	filePath         string
+	rotationEnabled  bool
+	maxSizeBytes     int64
+	maxAgeDays       int
+	currentSize      int64
+	lastRotationTime time.Time
+	rotationMu       sync.Mutex
 }
 
 type LogEntry struct {
@@ -68,12 +76,37 @@ func GetLevel() LogLevel {
 }
 
 func EnableFileLogging(filePath string) error {
+	return EnableFileLoggingWithRotation(filePath, false, 0, 0)
+}
+
+func EnableFileLoggingWithRotation(filePath string, rotationEnabled bool, maxSizeMB int, maxAgeDays int) error {
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Expand home directory in path
+	if strings.HasPrefix(filePath, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			filePath = filepath.Join(home, filePath[2:])
+		}
+	}
+
+	// Ensure directory exists
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create log directory: %w", err)
+	}
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open log file: %w", err)
+	}
+
+	// Get current file size
+	stat, err := file.Stat()
+	var currentSize int64
+	if err == nil {
+		currentSize = stat.Size()
 	}
 
 	if logger.file != nil {
@@ -81,7 +114,17 @@ func EnableFileLogging(filePath string) error {
 	}
 
 	logger.file = file
+	logger.filePath = filePath
+	logger.rotationEnabled = rotationEnabled
+	logger.maxSizeBytes = int64(maxSizeMB) * 1024 * 1024
+	logger.maxAgeDays = maxAgeDays
+	logger.currentSize = currentSize
+	logger.lastRotationTime = time.Now()
+
 	log.Println("File logging enabled:", filePath)
+	if rotationEnabled {
+		log.Printf("Log rotation enabled: max_size=%dMB, max_age=%d days", maxSizeMB, maxAgeDays)
+	}
 	return nil
 }
 
@@ -93,6 +136,103 @@ func DisableFileLogging() {
 		logger.file.Close()
 		logger.file = nil
 		log.Println("File logging disabled")
+	}
+}
+
+func (l *Logger) shouldRotate() bool {
+	if !l.rotationEnabled {
+		return false
+	}
+
+	// Check size-based rotation
+	if l.maxSizeBytes > 0 && l.currentSize >= l.maxSizeBytes {
+		return true
+	}
+
+	// Check age-based rotation (daily)
+	if l.maxAgeDays > 0 {
+		now := time.Now()
+		if now.YearDay() != l.lastRotationTime.YearDay() || now.Year() != l.lastRotationTime.Year() {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (l *Logger) rotateFile() error {
+	l.rotationMu.Lock()
+	defer l.rotationMu.Unlock()
+
+	if l.file == nil {
+		return nil
+	}
+
+	// Close current file
+	l.file.Close()
+
+	// Generate rotation timestamp
+	timestamp := time.Now().Format("20060102-150405")
+	rotatedPath := fmt.Sprintf("%s.%s", l.filePath, timestamp)
+
+	// Rename current file
+	if err := os.Rename(l.filePath, rotatedPath); err != nil {
+		// If rename fails, try to reopen the original file
+		file, openErr := os.OpenFile(l.filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if openErr == nil {
+			l.file = file
+		}
+		return fmt.Errorf("failed to rotate log file: %w", err)
+	}
+
+	// Open new file
+	file, err := os.OpenFile(l.filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create new log file: %w", err)
+	}
+
+	l.file = file
+	l.currentSize = 0
+	l.lastRotationTime = time.Now()
+
+	// Clean up old rotated files
+	go l.cleanOldRotatedFiles()
+
+	return nil
+}
+
+func (l *Logger) cleanOldRotatedFiles() {
+	if l.maxAgeDays <= 0 {
+		return
+	}
+
+	dir := filepath.Dir(l.filePath)
+	baseName := filepath.Base(l.filePath)
+	cutoffTime := time.Now().AddDate(0, 0, -l.maxAgeDays)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if !strings.HasPrefix(name, baseName+".") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if info.ModTime().Before(cutoffTime) {
+			os.Remove(filepath.Join(dir, name))
+		}
 	}
 }
 
@@ -117,9 +257,20 @@ func logMessage(level LogLevel, component string, message string, fields map[str
 	}
 
 	if logger.file != nil {
+		// Check if rotation is needed
+		if logger.shouldRotate() {
+			if err := logger.rotateFile(); err != nil {
+				log.Printf("Failed to rotate log file: %v", err)
+			}
+		}
+
 		jsonData, err := json.Marshal(entry)
 		if err == nil {
-			logger.file.WriteString(string(jsonData) + "\n")
+			line := string(jsonData) + "\n"
+			n, writeErr := logger.file.WriteString(line)
+			if writeErr == nil {
+				logger.currentSize += int64(n)
+			}
 		}
 	}
 

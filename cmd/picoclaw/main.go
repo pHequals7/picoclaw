@@ -532,6 +532,18 @@ func gatewayCmd() {
 		os.Exit(1)
 	}
 
+	// Enable file logging if configured
+	if cfg.Logging.FileEnabled {
+		if err := logger.EnableFileLoggingWithRotation(
+			cfg.Logging.FilePath,
+			cfg.Logging.RotationEnabled,
+			cfg.Logging.MaxSizeMB,
+			cfg.Logging.MaxAgeDays,
+		); err != nil {
+			fmt.Printf("Warning: Failed to enable file logging: %v\n", err)
+		}
+	}
+
 	provider, err := providers.CreateProvider(cfg)
 	if err != nil {
 		fmt.Printf("Error creating provider: %v\n", err)
