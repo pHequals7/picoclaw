@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -11,6 +13,72 @@ import (
 	"github.com/google/uuid"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
+
+// MediaImage holds a base64-encoded image with its MIME type.
+type MediaImage struct {
+	MimeType   string
+	Base64Data string
+}
+
+// IsImageFile checks if a file path has an image extension.
+func IsImageFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		return true
+	}
+	return false
+}
+
+// DetectImageMimeType returns the MIME type for an image file based on extension.
+func DetectImageMimeType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	}
+	return ""
+}
+
+// LoadAndEncodeImage reads an image file and returns its MIME type and base64-encoded data.
+func LoadAndEncodeImage(path string) (mimeType, base64Data string, err error) {
+	mimeType = DetectImageMimeType(path)
+	if mimeType == "" {
+		return "", "", fmt.Errorf("unsupported image type: %s", filepath.Ext(path))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("reading image %s: %w", path, err)
+	}
+	base64Data = base64.StdEncoding.EncodeToString(data)
+	return mimeType, base64Data, nil
+}
+
+// ProcessMediaImages filters media paths to images and encodes each one.
+func ProcessMediaImages(paths []string) []MediaImage {
+	var images []MediaImage
+	for _, p := range paths {
+		if !IsImageFile(p) {
+			continue
+		}
+		mimeType, b64, err := LoadAndEncodeImage(p)
+		if err != nil {
+			logger.WarnCF("media", "Failed to encode image",
+				map[string]interface{}{"path": p, "error": err.Error()})
+			continue
+		}
+		images = append(images, MediaImage{MimeType: mimeType, Base64Data: b64})
+		logger.DebugCF("media", "Encoded image for LLM",
+			map[string]interface{}{"path": p, "mime": mimeType, "size_bytes": len(b64) * 3 / 4})
+	}
+	return images
+}
 
 // IsAudioFile checks if a file is an audio file based on its filename extension and content type.
 func IsAudioFile(filename, contentType string) bool {

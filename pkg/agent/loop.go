@@ -57,6 +57,7 @@ type processOptions struct {
 	NoHistory       bool          // If true, don't load session history (for heartbeat)
 	CorrelationID   string        // Correlation ID for request tracing
 	ActionStream    *ActionStream // Action stream for visibility (optional)
+	Media           []string      // Media file paths (images, etc.)
 }
 
 // createToolRegistry creates a tool registry with common tools.
@@ -320,6 +321,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		SendResponse:    false,
 		CorrelationID:   msg.CorrelationID,
 		ActionStream:    actionStream,
+		Media:           msg.Media,
 	})
 }
 
@@ -404,7 +406,7 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 		history,
 		summary,
 		opts.UserMessage,
-		nil,
+		opts.Media,
 		opts.Channel,
 		opts.ChatID,
 	)

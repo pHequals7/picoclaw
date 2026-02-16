@@ -63,7 +63,7 @@ func (p *HTTPProvider) Chat(ctx context.Context, messages []Message, tools []Too
 
 	requestBody := map[string]interface{}{
 		"model":    model,
-		"messages": messages,
+		"messages": transformMessagesForOpenAI(messages),
 	}
 
 	if len(tools) > 0 {
@@ -195,6 +195,45 @@ func (p *HTTPProvider) parseResponse(body []byte) (*LLMResponse, error) {
 
 func (p *HTTPProvider) GetDefaultModel() string {
 	return ""
+}
+
+// transformMessagesForOpenAI converts messages to OpenAI-compatible format,
+// using content arrays for messages with images.
+func transformMessagesForOpenAI(messages []Message) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		m := map[string]interface{}{
+			"role": msg.Role,
+		}
+
+		// Only user messages can have images
+		if msg.Role == "user" && len(msg.Media) > 0 {
+			content := []map[string]interface{}{
+				{"type": "text", "text": msg.Content},
+			}
+			for _, img := range msg.Media {
+				content = append(content, map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]string{
+						"url": "data:" + img.MimeType + ";base64," + img.Base64Data,
+					},
+				})
+			}
+			m["content"] = content
+		} else {
+			m["content"] = msg.Content
+		}
+
+		if len(msg.ToolCalls) > 0 {
+			m["tool_calls"] = msg.ToolCalls
+		}
+		if msg.ToolCallID != "" {
+			m["tool_call_id"] = msg.ToolCallID
+		}
+
+		result = append(result, m)
+	}
+	return result
 }
 
 func createClaudeAuthProvider() (LLMProvider, error) {
