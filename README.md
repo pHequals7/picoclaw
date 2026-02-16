@@ -65,6 +65,8 @@
 
 🤖 **AI-Bootstrapped**: Autonomous Go-native implementation — 95% Agent-generated core with human-in-the-loop refinement.
 
+👁️ **Multimodal Vision**: Send photos via Telegram and get vision-based responses — images are base64-encoded and passed directly to Claude and OpenAI-compatible providers.
+
 |                               | OpenClaw      | NanoBot                  | **PicoClaw**                              |
 | ----------------------------- | ------------- | ------------------------ | ----------------------------------------- |
 | **Language**                  | TypeScript    | Python                   | **Go**                                    |
@@ -239,7 +241,9 @@ That's it! You have a working AI assistant in 2 minutes.
 
 ## 💬 Chat Apps
 
-Talk to your picoclaw through Telegram, Discord, DingTalk, or LINE
+Talk to your picoclaw through Telegram, Discord, DingTalk, or LINE.
+
+> **Vision support**: Send photos in Telegram and PicoClaw will describe, analyze, or answer questions about them. Supported formats: JPEG, PNG, GIF, WebP. Works with Claude and OpenAI-compatible providers.
 
 | Channel      | Setup                              |
 | ------------ | ---------------------------------- |
