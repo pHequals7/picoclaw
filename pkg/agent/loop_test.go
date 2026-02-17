@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/usage"
 )
 
 // mockProvider is a simple mock LLM provider for testing
@@ -373,6 +375,23 @@ func (m *simpleMockProvider) GetDefaultModel() string {
 	return "mock-model"
 }
 
+type usageMockProvider struct {
+	response string
+	usage    *providers.UsageInfo
+}
+
+func (m *usageMockProvider) Chat(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string, opts map[string]interface{}) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{
+		Content:   m.response,
+		ToolCalls: []providers.ToolCall{},
+		Usage:     m.usage,
+	}, nil
+}
+
+func (m *usageMockProvider) GetDefaultModel() string {
+	return "mock-model"
+}
+
 // mockCustomTool is a simple mock tool for registration testing
 type mockCustomTool struct{}
 
@@ -525,5 +544,115 @@ func TestToolResult_UserFacingToolDoesSendMessage(t *testing.T) {
 	// User-facing tool should include the output in final response
 	if response != "Command output: hello world" {
 		t.Errorf("Expected 'Command output: hello world', got: %s", response)
+	}
+}
+
+func TestUsageRecordedForLLMResponse(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-usage-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "claude-sonnet-4-6",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &usageMockProvider{
+		response: "ok",
+		usage: &providers.UsageInfo{
+			PromptTokens:     12,
+			CompletionTokens: 5,
+			TotalTokens:      17,
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	ctx := context.Background()
+	msg := bus.InboundMessage{
+		Channel:    "telegram",
+		SenderID:   "user1",
+		ChatID:     "chat1",
+		Content:    "hello",
+		SessionKey: "telegram:chat1",
+	}
+
+	if _, err := al.processMessage(ctx, msg); err != nil {
+		t.Fatalf("processMessage failed: %v", err)
+	}
+
+	records := al.usageStore.Query(usage.Filter{SessionKey: "telegram:chat1"})
+	if len(records) == 0 {
+		t.Fatalf("expected usage records, got 0")
+	}
+	if !records[0].UsageKnown {
+		t.Fatalf("expected usage_known=true")
+	}
+	if records[0].PromptTokens != 12 || records[0].CompletionTokens != 5 || records[0].TotalTokens != 17 {
+		t.Fatalf("unexpected usage record: %+v", records[0])
+	}
+}
+
+func TestUsageCommandShowsSeparateInputOutputCounts(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-usage-cmd-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "claude-sonnet-4-6",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &usageMockProvider{
+		response: "ok",
+		usage: &providers.UsageInfo{
+			PromptTokens:     10,
+			CompletionTokens: 4,
+			TotalTokens:      14,
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	ctx := context.Background()
+	msg := bus.InboundMessage{
+		Channel:    "telegram",
+		SenderID:   "user1",
+		ChatID:     "chat1",
+		Content:    "hello",
+		SessionKey: "telegram:chat1",
+	}
+	if _, err := al.processMessage(ctx, msg); err != nil {
+		t.Fatalf("processMessage failed: %v", err)
+	}
+
+	resp, err := al.processMessage(ctx, bus.InboundMessage{
+		Channel:    "telegram",
+		SenderID:   "user1",
+		ChatID:     "chat1",
+		Content:    "/usage last",
+		SessionKey: "telegram:chat1",
+	})
+	if err != nil {
+		t.Fatalf("usage command failed: %v", err)
+	}
+	if !strings.Contains(resp, "in=10") || !strings.Contains(resp, "out=4") || !strings.Contains(resp, "total=14") {
+		t.Fatalf("usage command missing split token counts: %s", resp)
 	}
 }

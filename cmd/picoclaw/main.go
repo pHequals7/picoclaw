@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -17,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +37,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/usage"
 	"github.com/sipeed/picoclaw/pkg/voice"
 )
 
@@ -134,6 +137,8 @@ func main() {
 		gatewayCmd()
 	case "status":
 		statusCmd()
+	case "usage":
+		usageCmd()
 	case "migrate":
 		migrateCmd()
 	case "auth":
@@ -208,6 +213,7 @@ func printHelp() {
 	fmt.Println("  auth        Manage authentication (login, logout, status)")
 	fmt.Println("  gateway     Start picoclaw gateway")
 	fmt.Println("  status      Show picoclaw status")
+	fmt.Println("  usage       Show token usage stats")
 	fmt.Println("  cron        Manage scheduled tasks")
 	fmt.Println("  migrate     Migrate from OpenClaw to PicoClaw")
 	fmt.Println("  skills      Manage skills (install, list, remove)")
@@ -759,6 +765,127 @@ func statusCmd() {
 			}
 		}
 	}
+}
+
+func usageCmd() {
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Printf("Error loading config: %v\n", err)
+		return
+	}
+
+	sessionKey := ""
+	dayKey := ""
+	provider := ""
+	limit := 20
+	jsonOut := false
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session":
+			if i+1 < len(args) {
+				sessionKey = args[i+1]
+				i++
+			}
+		case "--day":
+			if i+1 < len(args) {
+				dayKey = args[i+1]
+				i++
+			}
+		case "--provider":
+			if i+1 < len(args) {
+				provider = strings.ToLower(args[i+1])
+				i++
+			}
+		case "--limit":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &limit)
+				i++
+			}
+		case "--json":
+			jsonOut = true
+		case "--help", "-h":
+			fmt.Println("Usage: picoclaw usage [--session <key>] [--day YYYY-MM-DD] [--provider <name>] [--limit N] [--json]")
+			return
+		}
+	}
+
+	store := usage.NewStore(cfg.WorkspacePath())
+	if dayKey == "" && sessionKey == "" && provider == "" {
+		dayKey = store.TodayKey()
+	}
+
+	records := store.Query(usage.Filter{
+		SessionKey: sessionKey,
+		DayKey:     dayKey,
+		Provider:   provider,
+		Limit:      limit,
+	})
+
+	result := map[string]interface{}{
+		"session":     sessionKey,
+		"day":         dayKey,
+		"provider":    provider,
+		"limit":       limit,
+		"count":       len(records),
+		"summary":     usage.AggregateRecords(records),
+		"by_provider": usage.ProviderBreakdown(records),
+		"records":     records,
+	}
+
+	if jsonOut {
+		out, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(out))
+		return
+	}
+
+	fmt.Printf("%s usage\n", logo)
+	fmt.Println(formatUsageAggregateLine("Summary", usage.AggregateRecords(records)))
+	if len(records) == 0 {
+		fmt.Println("No usage records found for this filter.")
+		return
+	}
+
+	byProvider := usage.ProviderBreakdown(records)
+	if len(byProvider) > 0 {
+		fmt.Println("By provider:")
+		keys := make([]string, 0, len(byProvider))
+		for p := range byProvider {
+			keys = append(keys, p)
+		}
+		sort.Strings(keys)
+		for _, p := range keys {
+			fmt.Println(" ", formatUsageAggregateLine(p, byProvider[p]))
+		}
+	}
+
+	fmt.Println("Recent records:")
+	for _, r := range records {
+		fmt.Printf("- %s provider=%s model=%s known=%t in=%d out=%d total=%d session=%s reason=%s\n",
+			r.Timestamp.Format(time.RFC3339),
+			r.Provider,
+			r.Model,
+			r.UsageKnown,
+			r.PromptTokens,
+			r.CompletionTokens,
+			r.TotalTokens,
+			r.SessionKey,
+			r.Reason,
+		)
+	}
+}
+
+func formatUsageAggregateLine(label string, agg usage.Aggregate) string {
+	return fmt.Sprintf("%s: calls=%d known=%d unknown=%d in=%d out=%d total=%d",
+		label,
+		agg.Calls,
+		agg.KnownCalls,
+		agg.UnknownCalls,
+		agg.PromptTokens,
+		agg.CompletionTokens,
+		agg.TotalTokens,
+	)
 }
 
 func authCmd() {

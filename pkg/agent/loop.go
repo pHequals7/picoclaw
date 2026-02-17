@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,29 +23,34 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
+	"github.com/sipeed/picoclaw/pkg/failover"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/usage"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type AgentLoop struct {
-	bus            *bus.MessageBus
-	provider       providers.LLMProvider
-	workspace      string
-	model          string
-	contextWindow  int // Maximum context window size in tokens
-	maxIterations  int
-	sessions       *session.SessionManager
-	state          *state.Manager
-	contextBuilder *ContextBuilder
-	tools          *tools.ToolRegistry
-	config         *config.Config
-	running        atomic.Bool
-	summarizing    sync.Map // Tracks which sessions are currently being summarized
-	activeCancel   sync.Map // sessionKey -> context.CancelFunc for in-flight requests
+	bus              *bus.MessageBus
+	provider         providers.LLMProvider
+	workspace        string
+	model            string
+	contextWindow    int // Maximum context window size in tokens
+	maxIterations    int
+	sessions         *session.SessionManager
+	state            *state.Manager
+	contextBuilder   *ContextBuilder
+	tools            *tools.ToolRegistry
+	config           *config.Config
+	failover         *failover.Manager
+	usageStore       *usage.Store
+	running          atomic.Bool
+	summarizing      sync.Map // Tracks which sessions are currently being summarized
+	activeCancel     sync.Map // sessionKey -> context.CancelFunc for in-flight requests
+	fallbackNotified sync.Map // sessionKey -> switchEpoch
 }
 
 // processOptions configures how a message is processed
@@ -165,6 +171,8 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	// Create context builder and set tools registry
 	contextBuilder := NewContextBuilder(workspace)
 	contextBuilder.SetToolsRegistry(toolsRegistry)
+	failoverManager := failover.NewManager(cfg, stateManager)
+	failoverManager.SetProviderForModel(cfg.Agents.Defaults.Model, provider)
 
 	return &AgentLoop{
 		bus:            msgBus,
@@ -178,12 +186,15 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		contextBuilder: contextBuilder,
 		tools:          toolsRegistry,
 		config:         cfg,
+		failover:       failoverManager,
+		usageStore:     usage.NewStore(workspace),
 		summarizing:    sync.Map{},
 	}
 }
 
 func (al *AgentLoop) Run(ctx context.Context) error {
 	al.running.Store(true)
+	go al.runFailoverProbeLoop(ctx)
 
 	for al.running.Load() {
 		select {
@@ -332,6 +343,16 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return al.processSystemMessage(ctx, msg)
 	}
 
+	trimmed := strings.TrimSpace(msg.Content)
+	if strings.HasPrefix(trimmed, "/usage") {
+		return al.handleUsageCommand(msg, trimmed), nil
+	}
+
+	// Handle switch-back confirmation replies before normal LLM processing.
+	if outcome := al.failover.HandleUserSwitchbackDecision(msg.Content); outcome.Handled {
+		return outcome.Reply, nil
+	}
+
 	// Create ActionStream for visibility if enabled
 	var actionStream *ActionStream
 	if al.config.Visibility.Enabled {
@@ -360,6 +381,169 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		ActionStream:    actionStream,
 		Media:           msg.Media,
 	})
+}
+
+func formatUsageAggregate(label string, agg usage.Aggregate) string {
+	return fmt.Sprintf(
+		"%s: calls=%d known=%d unknown=%d in=%d out=%d total=%d",
+		label,
+		agg.Calls,
+		agg.KnownCalls,
+		agg.UnknownCalls,
+		agg.PromptTokens,
+		agg.CompletionTokens,
+		agg.TotalTokens,
+	)
+}
+
+func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) string {
+	parts := strings.Fields(command)
+	mode := ""
+	if len(parts) > 1 {
+		mode = strings.ToLower(parts[1])
+	}
+
+	dayKey := al.usageStore.TodayKey()
+	sessionKey := msg.SessionKey
+	if sessionKey == "" {
+		sessionKey = fmt.Sprintf("%s:%s", msg.Channel, msg.ChatID)
+	}
+
+	switch mode {
+	case "last":
+		last, ok := al.usageStore.LastBySession(sessionKey)
+		if !ok {
+			return "No usage records found for this session yet."
+		}
+		return fmt.Sprintf(
+			"Last usage (%s, %s): known=%t in=%d out=%d total=%d provider=%s model=%s reason=%s",
+			last.Timestamp.Format(time.RFC3339),
+			last.DayKey,
+			last.UsageKnown,
+			last.PromptTokens,
+			last.CompletionTokens,
+			last.TotalTokens,
+			last.Provider,
+			last.Model,
+			last.Reason,
+		)
+	case "session":
+		records := al.usageStore.Query(usage.Filter{SessionKey: sessionKey, Limit: 20})
+		if len(records) == 0 {
+			return "No usage records found for this session yet."
+		}
+		lines := []string{
+			fmt.Sprintf("Session usage (%s) latest %d:", sessionKey, len(records)),
+			formatUsageAggregate("Summary", usage.AggregateRecords(records)),
+		}
+		for _, r := range records {
+			lines = append(lines, fmt.Sprintf(
+				"- %s provider=%s model=%s known=%t in=%d out=%d total=%d reason=%s",
+				r.Timestamp.Format(time.RFC3339),
+				r.Provider,
+				r.Model,
+				r.UsageKnown,
+				r.PromptTokens,
+				r.CompletionTokens,
+				r.TotalTokens,
+				r.Reason,
+			))
+		}
+		return strings.Join(lines, "\n")
+	case "today":
+		records := al.usageStore.Query(usage.Filter{DayKey: dayKey})
+		if len(records) == 0 {
+			return fmt.Sprintf("No usage records for today (%s) yet.", dayKey)
+		}
+		lines := []string{
+			fmt.Sprintf("Today usage (%s):", dayKey),
+			formatUsageAggregate("Summary", usage.AggregateRecords(records)),
+			"By provider:",
+		}
+		byProvider := usage.ProviderBreakdown(records)
+		providers := make([]string, 0, len(byProvider))
+		for p := range byProvider {
+			providers = append(providers, p)
+		}
+		sort.Strings(providers)
+		for _, p := range providers {
+			lines = append(lines, "  "+formatUsageAggregate(p, byProvider[p]))
+		}
+		return strings.Join(lines, "\n")
+	case "provider":
+		todayRecords := al.usageStore.Query(usage.Filter{DayKey: dayKey})
+		sessionRecords := al.usageStore.Query(usage.Filter{SessionKey: sessionKey})
+		if len(todayRecords) == 0 && len(sessionRecords) == 0 {
+			return "No usage records found yet."
+		}
+		lines := []string{
+			fmt.Sprintf("Provider usage (today %s + session %s):", dayKey, sessionKey),
+			"Today by provider:",
+		}
+		todayByProvider := usage.ProviderBreakdown(todayRecords)
+		sessionByProvider := usage.ProviderBreakdown(sessionRecords)
+		todayKeys := make([]string, 0, len(todayByProvider))
+		for p := range todayByProvider {
+			todayKeys = append(todayKeys, p)
+		}
+		sort.Strings(todayKeys)
+		if len(todayKeys) == 0 {
+			lines = append(lines, "  none")
+		}
+		for _, p := range todayKeys {
+			lines = append(lines, "  "+formatUsageAggregate(p, todayByProvider[p]))
+		}
+		lines = append(lines, "Session by provider:")
+		sessionKeys := make([]string, 0, len(sessionByProvider))
+		for p := range sessionByProvider {
+			sessionKeys = append(sessionKeys, p)
+		}
+		sort.Strings(sessionKeys)
+		if len(sessionKeys) == 0 {
+			lines = append(lines, "  none")
+		}
+		for _, p := range sessionKeys {
+			lines = append(lines, "  "+formatUsageAggregate(p, sessionByProvider[p]))
+		}
+		return strings.Join(lines, "\n")
+	default:
+		todayRecords := al.usageStore.Query(usage.Filter{DayKey: dayKey})
+		sessionRecords := al.usageStore.Query(usage.Filter{SessionKey: sessionKey})
+		last, hasLast := al.usageStore.LastBySession(sessionKey)
+		lines := []string{
+			fmt.Sprintf("Usage dashboard (session=%s, day=%s)", sessionKey, dayKey),
+		}
+		if hasLast {
+			lines = append(lines, fmt.Sprintf(
+				"Last: known=%t in=%d out=%d total=%d provider=%s model=%s reason=%s",
+				last.UsageKnown,
+				last.PromptTokens,
+				last.CompletionTokens,
+				last.TotalTokens,
+				last.Provider,
+				last.Model,
+				last.Reason,
+			))
+		} else {
+			lines = append(lines, "Last: none")
+		}
+		lines = append(lines, formatUsageAggregate("Session", usage.AggregateRecords(sessionRecords)))
+		lines = append(lines, formatUsageAggregate("Today", usage.AggregateRecords(todayRecords)))
+		byProvider := usage.ProviderBreakdown(todayRecords)
+		if len(byProvider) > 0 {
+			lines = append(lines, "Today by provider:")
+			keys := make([]string, 0, len(byProvider))
+			for p := range byProvider {
+				keys = append(keys, p)
+			}
+			sort.Strings(keys)
+			for _, p := range keys {
+				lines = append(lines, "  "+formatUsageAggregate(p, byProvider[p]))
+			}
+		}
+		lines = append(lines, "Commands: /usage last | /usage session | /usage today | /usage provider")
+		return strings.Join(lines, "\n")
+	}
 }
 
 func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
@@ -451,8 +635,23 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 	// 3. Save user message to session
 	al.sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
+	route, err := al.failover.ResolveRoute()
+	if err != nil {
+		return "", fmt.Errorf("resolve LLM route: %w", err)
+	}
+	if al.config.Agents.Failover.NotifyOnFallbackUse && !route.IsPrimary && opts.Channel != "" && opts.ChatID != "" {
+		if val, ok := al.fallbackNotified.Load(opts.SessionKey); !ok || val.(int64) != route.SwitchEpoch {
+			al.bus.PublishOutbound(bus.OutboundMessage{
+				Channel: opts.Channel,
+				ChatID:  opts.ChatID,
+				Content: fmt.Sprintf("Using fallback model %s while primary model %s is unavailable.", route.Model, al.failover.PrimaryModel()),
+			})
+			al.fallbackNotified.Store(opts.SessionKey, route.SwitchEpoch)
+		}
+	}
+
 	// 4. Run LLM iteration loop
-	finalContent, iteration, err := al.runLLMIteration(ctx, messages, opts)
+	finalContent, iteration, err := al.runLLMIteration(ctx, messages, opts, route.Provider, route.Model)
 	if err != nil {
 		return "", err
 	}
@@ -498,9 +697,10 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 
 // runLLMIteration executes the LLM call loop with tool handling.
 // Returns the final content, iteration count, and any error.
-func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.Message, opts processOptions) (string, int, error) {
+func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.Message, opts processOptions, currentProvider providers.LLMProvider, currentModel string) (string, int, error) {
 	iteration := 0
 	var finalContent string
+	callIndex := 0
 
 	for iteration < al.maxIterations {
 		iteration++
@@ -518,7 +718,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 		logger.DebugCF("agent", "LLM request",
 			map[string]interface{}{
 				"iteration":         iteration,
-				"model":             al.model,
+				"model":             currentModel,
 				"messages_count":    len(messages),
 				"tools_count":       len(providerToolDefs),
 				"max_tokens":        8192,
@@ -535,44 +735,57 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			})
 
 		// Call LLM
-		response, err := al.provider.Chat(ctx, messages, providerToolDefs, al.model, map[string]interface{}{
+		response, err := currentProvider.Chat(ctx, messages, providerToolDefs, currentModel, map[string]interface{}{
 			"max_tokens":  8192,
 			"temperature": 0.7,
 		})
+		callIndex++
+		if err == nil {
+			al.recordUsage(opts, iteration, callIndex, currentModel, "normal_call", response)
+		}
 
 		if err != nil {
 			var rateLimitErr *providers.RateLimitError
-			if errors.As(err, &rateLimitErr) && al.config.Agents.Defaults.FallbackModel != "" {
-				fallbackModel := al.config.Agents.Defaults.FallbackModel
-				logger.WarnCF("agent", "Rate limited, attempting failover",
-					map[string]interface{}{
-						"iteration":      iteration,
-						"fallback_model": fallbackModel,
-					})
+			if errors.As(err, &rateLimitErr) {
+				switchEvent := al.failover.OnLLMRateLimited(currentModel, err)
+				if switchEvent.Switched {
+					logger.WarnCF("agent", "Rate limited, switching model",
+						map[string]interface{}{
+							"iteration":  iteration,
+							"from_model": switchEvent.FromModel,
+							"to_model":   switchEvent.ToModel,
+							"reason":     switchEvent.Reason,
+						})
 
-				// Notify the user
-				if opts.Channel != "" && opts.ChatID != "" {
-					al.bus.PublishOutbound(bus.OutboundMessage{
-						Channel: opts.Channel,
-						ChatID:  opts.ChatID,
-						Content: fmt.Sprintf("Rate limited by primary provider. Falling back to %s...", fallbackModel),
-					})
-				}
+					if al.config.Agents.Failover.NotifyOnSwitch && opts.Channel != "" && opts.ChatID != "" {
+						al.bus.PublishOutbound(bus.OutboundMessage{
+							Channel: opts.Channel,
+							ChatID:  opts.ChatID,
+							Content: fmt.Sprintf("Provider/model switch: %s -> %s (%s).", switchEvent.FromModel, switchEvent.ToModel, switchEvent.Reason),
+						})
+					}
 
-				// Create fallback provider and retry
-				fallbackProvider, fbErr := providers.CreateProviderForModel(al.config, fallbackModel)
-				if fbErr == nil {
-					response, err = fallbackProvider.Chat(ctx, messages, providerToolDefs, fallbackModel, map[string]interface{}{
+					route, routeErr := al.failover.ResolveRoute()
+					if routeErr != nil {
+						return "", iteration, fmt.Errorf("failed to resolve route after failover: %w", routeErr)
+					}
+					currentProvider = route.Provider
+					currentModel = route.Model
+
+					response, err = currentProvider.Chat(ctx, messages, providerToolDefs, currentModel, map[string]interface{}{
 						"max_tokens":  8192,
 						"temperature": 0.7,
 					})
-				}
-				if err != nil {
-					logger.ErrorCF("agent", "Fallback LLM call also failed",
+					callIndex++
+					if err == nil {
+						al.recordUsage(opts, iteration, callIndex, currentModel, "failover_retry", response)
+					}
+				} else {
+					logger.WarnCF("agent", "Rate limited and no failover path available",
 						map[string]interface{}{
-							"iteration":      iteration,
-							"fallback_model": fallbackModel,
-							"error":          err.Error(),
+							"iteration": iteration,
+							"model":     currentModel,
+							"reason":    switchEvent.Reason,
 						})
 				}
 			}
@@ -586,6 +799,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				return "", iteration, fmt.Errorf("LLM call failed: %w", err)
 			}
 		}
+		al.failover.OnLLMSuccess(currentModel)
 
 		// Check if no tool calls - we're done
 		if len(response.ToolCalls) == 0 {
@@ -715,6 +929,97 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 	}
 
 	return finalContent, iteration, nil
+}
+
+func (al *AgentLoop) recordUsage(opts processOptions, iteration, callIndex int, model, reason string, response *providers.LLMResponse) {
+	if al.usageStore == nil || response == nil {
+		return
+	}
+
+	providerName := providers.InferProviderFromModel(model)
+	record := usage.Record{
+		SessionKey:    opts.SessionKey,
+		Channel:       opts.Channel,
+		ChatID:        opts.ChatID,
+		CorrelationID: opts.CorrelationID,
+		Iteration:     iteration,
+		CallIndex:     callIndex,
+		Provider:      providerName,
+		Model:         model,
+		Reason:        reason,
+		FinishReason:  response.FinishReason,
+		UsageKnown:    response.Usage != nil,
+	}
+
+	if response.Usage != nil {
+		record.PromptTokens = response.Usage.PromptTokens
+		record.CompletionTokens = response.Usage.CompletionTokens
+		record.TotalTokens = response.Usage.TotalTokens
+	}
+	_ = al.usageStore.Append(record)
+}
+
+func (al *AgentLoop) runFailoverProbeLoop(ctx context.Context) {
+	if !al.config.Agents.Failover.Enabled {
+		return
+	}
+	interval := al.config.Agents.Failover.ProbeIntervalMinutes
+	if interval <= 0 {
+		interval = 5
+	}
+	ticker := time.NewTicker(time.Duration(interval) * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			if !al.failover.ShouldProbe(now) {
+				if prompt, ok := al.failover.ShouldSendSwitchbackPrompt(now); ok {
+					al.sendToLastActiveChat(prompt)
+				}
+				continue
+			}
+
+			probeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			outcome := al.failover.RunProbe(probeCtx)
+			cancel()
+			if outcome.PromptText != "" {
+				al.sendToLastActiveChat(outcome.PromptText)
+			} else if outcome.BecameHealthy {
+				if prompt, ok := al.failover.ShouldSendSwitchbackPrompt(time.Now()); ok {
+					al.sendToLastActiveChat(prompt)
+				}
+			}
+		}
+	}
+}
+
+func (al *AgentLoop) sendToLastActiveChat(content string) {
+	last := al.state.GetLastChannel()
+	if last == "" || content == "" {
+		return
+	}
+
+	channel, chatID, ok := parseChannelKey(last)
+	if !ok || constants.IsInternalChannel(channel) {
+		return
+	}
+	al.bus.PublishOutbound(bus.OutboundMessage{
+		Channel: channel,
+		ChatID:  chatID,
+		Content: content,
+	})
+}
+
+func parseChannelKey(key string) (string, string, bool) {
+	idx := strings.Index(key, ":")
+	if idx <= 0 || idx+1 >= len(key) {
+		return "", "", false
+	}
+	return key[:idx], key[idx+1:], true
 }
 
 // updateToolContexts updates the context for tools that need channel/chatID info.
