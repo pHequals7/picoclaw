@@ -21,6 +21,20 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+// RateLimitError is returned when the LLM provider responds with 429 Too Many Requests.
+type RateLimitError struct {
+	StatusCode             int
+	Body                   string
+	RetryAfter             string
+	RateLimitRequestsReset string
+	RateLimitTokensReset   string
+	Headers                map[string]string
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("rate limited (status %d): %s", e.StatusCode, e.Body)
+}
+
 type HTTPProvider struct {
 	apiKey     string
 	apiBase    string
@@ -117,6 +131,22 @@ func (p *HTTPProvider) Chat(ctx context.Context, messages []Message, tools []Too
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			headers := map[string]string{}
+			for k, v := range resp.Header {
+				if len(v) > 0 {
+					headers[k] = strings.Join(v, ", ")
+				}
+			}
+			return nil, &RateLimitError{
+				StatusCode:             resp.StatusCode,
+				Body:                   string(body),
+				RetryAfter:             resp.Header.Get("Retry-After"),
+				RateLimitRequestsReset: resp.Header.Get("X-RateLimit-Requests-Reset"),
+				RateLimitTokensReset:   resp.Header.Get("X-RateLimit-Tokens-Reset"),
+				Headers:                headers,
+			}
+		}
 		return nil, fmt.Errorf("API request failed:\n  Status: %d\n  Body:   %s", resp.StatusCode, string(body))
 	}
 
@@ -262,8 +292,11 @@ func createCodexAuthProvider() (LLMProvider, error) {
 }
 
 func CreateProvider(cfg *config.Config) (LLMProvider, error) {
-	model := cfg.Agents.Defaults.Model
-	providerName := strings.ToLower(cfg.Agents.Defaults.Provider)
+	return createProviderWithSelection(cfg, cfg.Agents.Defaults.Model, cfg.Agents.Defaults.Provider)
+}
+
+func createProviderWithSelection(cfg *config.Config, model string, provider string) (LLMProvider, error) {
+	providerName := strings.ToLower(provider)
 
 	var apiKey, apiBase, proxy string
 
@@ -472,4 +505,10 @@ func CreateProvider(cfg *config.Config) (LLMProvider, error) {
 	}
 
 	return NewHTTPProvider(apiKey, apiBase, proxy), nil
+}
+
+// CreateProviderForModel creates a provider resolved from a specific model name,
+// ignoring the default provider/model in config. Used for failover.
+func CreateProviderForModel(cfg *config.Config, model string) (LLMProvider, error) {
+	return createProviderWithSelection(cfg, model, "")
 }

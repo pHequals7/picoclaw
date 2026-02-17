@@ -176,4 +176,10 @@ func TestConfig_Complete(t *testing.T) {
 	if !cfg.Heartbeat.Enabled {
 		t.Error("Heartbeat should be enabled by default")
 	}
+	if !cfg.Agents.Failover.Enabled {
+		t.Error("Failover should be enabled by default")
+	}
+	if cfg.Agents.Failover.HoldMinutes == 0 {
+		t.Error("Failover hold window should have default value")
+	}
 }

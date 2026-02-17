@@ -21,6 +21,27 @@ type State struct {
 
 	// Timestamp is the last time this state was updated
 	Timestamp time.Time `json:"timestamp"`
+
+	// Failover tracks gateway-wide model failover state.
+	Failover FailoverState `json:"failover,omitempty"`
+}
+
+// FailoverState contains persisted circuit-breaker state for model routing.
+type FailoverState struct {
+	Mode                      string    `json:"mode,omitempty"` // normal|degraded|recovering|awaiting_user_switchback
+	PrimaryModel              string    `json:"primary_model,omitempty"`
+	ActiveModel               string    `json:"active_model,omitempty"`
+	FallbackIndex             int       `json:"fallback_index"`
+	DegradedAt                time.Time `json:"degraded_at,omitempty"`
+	HoldUntil                 time.Time `json:"hold_until,omitempty"`
+	NextProbeAt               time.Time `json:"next_probe_at,omitempty"`
+	LastProbeAt               time.Time `json:"last_probe_at,omitempty"`
+	ConsecutiveProbeSuccesses int       `json:"consecutive_probe_successes"`
+	LastRateLimitError        string    `json:"last_rate_limit_error,omitempty"`
+	LastSwitchReason          string    `json:"last_switch_reason,omitempty"`
+	LastSwitchbackPromptAt    time.Time `json:"last_switchback_prompt_at,omitempty"`
+	LastSwitchbackProbe       string    `json:"last_switchback_probe,omitempty"`
+	SwitchEpoch               int64     `json:"switch_epoch"`
 }
 
 // Manager manages persistent state with atomic saves.
@@ -119,6 +140,26 @@ func (sm *Manager) GetTimestamp() time.Time {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.state.Timestamp
+}
+
+// GetFailoverState returns a snapshot of failover state.
+func (sm *Manager) GetFailoverState() FailoverState {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.state.Failover
+}
+
+// SetFailoverState atomically updates failover state.
+func (sm *Manager) SetFailoverState(fs FailoverState) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.state.Failover = fs
+	sm.state.Timestamp = time.Now()
+	if err := sm.saveAtomic(); err != nil {
+		return fmt.Errorf("failed to save state atomically: %w", err)
+	}
+	return nil
 }
 
 // saveAtomic performs an atomic save using temp file + rename.

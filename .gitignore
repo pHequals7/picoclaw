@@ -49,3 +49,6 @@ package-lock.json
 
 # Added by goreleaser init:
 dist/
+
+# Local notes/log captures
+*.txt
