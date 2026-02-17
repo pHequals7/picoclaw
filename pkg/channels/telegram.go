@@ -496,6 +496,10 @@ func (c *TelegramChannel) downloadFileWithInfo(file *telego.File, ext string) st
 	filename := file.FilePath
 	if filepath.Ext(filename) == "" {
 		filename += ext
+	} else if filepath.Ext(filename) == ".oga" {
+		// Telegram sends voice notes as .oga but Groq Whisper doesn't accept it;
+		// .oga and .ogg are the same Ogg container format, so rename the extension.
+		filename = filename[:len(filename)-4] + ".ogg"
 	}
 	return utils.DownloadFile(url, filename, utils.DownloadOptions{
 		LoggerPrefix: "telegram",
