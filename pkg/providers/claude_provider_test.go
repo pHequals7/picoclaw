@@ -47,8 +47,30 @@ func TestBuildClaudeParams_SystemMessage(t *testing.T) {
 	if params.System[0].Text != "You are helpful" {
 		t.Errorf("System[0].Text = %q, want %q", params.System[0].Text, "You are helpful")
 	}
+	if string(params.System[0].CacheControl.Type) != "ephemeral" {
+		t.Errorf("System[0].CacheControl.Type = %q, want %q", params.System[0].CacheControl.Type, "ephemeral")
+	}
+	if params.System[0].CacheControl.TTL != anthropic.CacheControlEphemeralTTLTTL1h {
+		t.Errorf("System[0].CacheControl.TTL = %q, want %q", params.System[0].CacheControl.TTL, anthropic.CacheControlEphemeralTTLTTL1h)
+	}
 	if len(params.Messages) != 1 {
 		t.Fatalf("len(Messages) = %d, want 1", len(params.Messages))
+	}
+}
+
+func TestBuildClaudeParams_SystemMessagePromptCacheDisabled(t *testing.T) {
+	messages := []Message{
+		{Role: "system", Content: "You are helpful"},
+		{Role: "user", Content: "Hi"},
+	}
+	params, err := buildClaudeParams(messages, nil, "claude-sonnet-4-5-20250929", map[string]interface{}{
+		"anthropic_prompt_cache": false,
+	})
+	if err != nil {
+		t.Fatalf("buildClaudeParams() error: %v", err)
+	}
+	if string(params.System[0].CacheControl.Type) != "" {
+		t.Errorf("System[0].CacheControl.Type = %q, want empty", params.System[0].CacheControl.Type)
 	}
 }
 
@@ -120,6 +142,25 @@ func TestParseClaudeResponse_TextOnly(t *testing.T) {
 	}
 	if result.FinishReason != "stop" {
 		t.Errorf("FinishReason = %q, want %q", result.FinishReason, "stop")
+	}
+}
+
+func TestParseClaudeResponse_IncludesCacheTokensInInputAndTotal(t *testing.T) {
+	resp := &anthropic.Message{
+		Content: []anthropic.ContentBlockUnion{},
+		Usage: anthropic.Usage{
+			InputTokens:              10,
+			CacheCreationInputTokens: 100,
+			CacheReadInputTokens:     50,
+			OutputTokens:             20,
+		},
+	}
+	result := parseClaudeResponse(resp)
+	if result.Usage.PromptTokens != 160 {
+		t.Errorf("PromptTokens = %d, want 160", result.Usage.PromptTokens)
+	}
+	if result.Usage.TotalTokens != 180 {
+		t.Errorf("TotalTokens = %d, want 180", result.Usage.TotalTokens)
 	}
 }
 

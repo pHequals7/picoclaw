@@ -761,6 +761,133 @@ func statusCmd() {
 	}
 }
 
+func usageCmd() {
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Printf("Error loading config: %v\n", err)
+		return
+	}
+
+	sessionKey := ""
+	dayKey := ""
+	provider := ""
+	limit := 20
+	jsonOut := false
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session":
+			if i+1 < len(args) {
+				sessionKey = args[i+1]
+				i++
+			}
+		case "--day":
+			if i+1 < len(args) {
+				dayKey = args[i+1]
+				i++
+			}
+		case "--provider":
+			if i+1 < len(args) {
+				provider = strings.ToLower(args[i+1])
+				i++
+			}
+		case "--limit":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &limit)
+				i++
+			}
+		case "--json":
+			jsonOut = true
+		case "--help", "-h":
+			fmt.Println("Usage: picoclaw usage [--session <key>] [--day YYYY-MM-DD] [--provider <name>] [--limit N] [--json]")
+			return
+		}
+	}
+
+	store := usage.NewStore(cfg.WorkspacePath())
+	if dayKey == "" && sessionKey == "" && provider == "" {
+		dayKey = store.TodayKey()
+	}
+
+	records := store.Query(usage.Filter{
+		SessionKey: sessionKey,
+		DayKey:     dayKey,
+		Provider:   provider,
+		Limit:      limit,
+	})
+
+	result := map[string]interface{}{
+		"session":     sessionKey,
+		"day":         dayKey,
+		"provider":    provider,
+		"limit":       limit,
+		"count":       len(records),
+		"summary":     usage.AggregateRecords(records),
+		"by_provider": usage.ProviderBreakdown(records),
+		"records":     records,
+	}
+
+	if jsonOut {
+		out, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(out))
+		return
+	}
+
+	fmt.Printf("%s usage\n", logo)
+	fmt.Println(formatUsageAggregateLine("Summary", usage.AggregateRecords(records)))
+	if len(records) == 0 {
+		fmt.Println("No usage records found for this filter.")
+		return
+	}
+
+	byProvider := usage.ProviderBreakdown(records)
+	if len(byProvider) > 0 {
+		fmt.Println("By provider:")
+		keys := make([]string, 0, len(byProvider))
+		for p := range byProvider {
+			keys = append(keys, p)
+		}
+		sort.Strings(keys)
+		for _, p := range keys {
+			fmt.Println(" ", formatUsageAggregateLine(p, byProvider[p]))
+		}
+	}
+
+	fmt.Println("Recent records:")
+	for _, r := range records {
+		fmt.Printf("- %s provider=%s model=%s known=%t in=%s (%s) out=%s (%s) total=%s (%s) session=%s reason=%s\n",
+			r.Timestamp.Format(time.RFC3339),
+			r.Provider,
+			r.Model,
+			r.UsageKnown,
+			usage.GroupedInt(r.PromptTokens),
+			usage.HumanTokens(r.PromptTokens),
+			usage.GroupedInt(r.CompletionTokens),
+			usage.HumanTokens(r.CompletionTokens),
+			usage.GroupedInt(r.TotalTokens),
+			usage.HumanTokens(r.TotalTokens),
+			r.SessionKey,
+			r.Reason,
+		)
+	}
+}
+
+func formatUsageAggregateLine(label string, agg usage.Aggregate) string {
+	return fmt.Sprintf("%s: calls=%d known=%d unknown=%d in=%s (%s) out=%s (%s) total=%s (%s)",
+		label,
+		agg.Calls,
+		agg.KnownCalls,
+		agg.UnknownCalls,
+		usage.GroupedInt(agg.PromptTokens),
+		usage.HumanTokens(agg.PromptTokens),
+		usage.GroupedInt(agg.CompletionTokens),
+		usage.HumanTokens(agg.CompletionTokens),
+		usage.GroupedInt(agg.TotalTokens),
+		usage.HumanTokens(agg.TotalTokens),
+	)
+}
+
 func authCmd() {
 	if len(os.Args) < 3 {
 		authHelp()

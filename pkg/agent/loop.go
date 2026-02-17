@@ -361,6 +361,181 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	})
 }
 
+func formatUsageAggregate(label string, agg usage.Aggregate) string {
+	return fmt.Sprintf(
+		"%s: calls=%d known=%d unknown=%d in=%s (%s) out=%s (%s) total=%s (%s)",
+		label,
+		agg.Calls,
+		agg.KnownCalls,
+		agg.UnknownCalls,
+		usage.GroupedInt(agg.PromptTokens),
+		usage.HumanTokens(agg.PromptTokens),
+		usage.GroupedInt(agg.CompletionTokens),
+		usage.HumanTokens(agg.CompletionTokens),
+		usage.GroupedInt(agg.TotalTokens),
+		usage.HumanTokens(agg.TotalTokens),
+	)
+}
+
+func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) string {
+	parts := strings.Fields(command)
+	mode := ""
+	if len(parts) > 1 {
+		mode = strings.ToLower(parts[1])
+	}
+
+	dayKey := al.usageStore.TodayKey()
+	sessionKey := msg.SessionKey
+	if sessionKey == "" {
+		sessionKey = fmt.Sprintf("%s:%s", msg.Channel, msg.ChatID)
+	}
+
+	switch mode {
+	case "last":
+		last, ok := al.usageStore.LastBySession(sessionKey)
+		if !ok {
+			return "No usage records found for this session yet."
+		}
+		return fmt.Sprintf(
+			"Last usage (%s, %s): known=%t in=%s (%s) out=%s (%s) total=%s (%s) provider=%s model=%s reason=%s",
+			last.Timestamp.Format(time.RFC3339),
+			last.DayKey,
+			last.UsageKnown,
+			usage.GroupedInt(last.PromptTokens),
+			usage.HumanTokens(last.PromptTokens),
+			usage.GroupedInt(last.CompletionTokens),
+			usage.HumanTokens(last.CompletionTokens),
+			usage.GroupedInt(last.TotalTokens),
+			usage.HumanTokens(last.TotalTokens),
+			last.Provider,
+			last.Model,
+			last.Reason,
+		)
+	case "session":
+		records := al.usageStore.Query(usage.Filter{SessionKey: sessionKey, Limit: 20})
+		if len(records) == 0 {
+			return "No usage records found for this session yet."
+		}
+		lines := []string{
+			fmt.Sprintf("Session usage (%s) latest %d:", sessionKey, len(records)),
+			formatUsageAggregate("Summary", usage.AggregateRecords(records)),
+		}
+		for _, r := range records {
+			lines = append(lines, fmt.Sprintf(
+				"- %s provider=%s model=%s known=%t in=%s (%s) out=%s (%s) total=%s (%s) reason=%s",
+				r.Timestamp.Format(time.RFC3339),
+				r.Provider,
+				r.Model,
+				r.UsageKnown,
+				usage.GroupedInt(r.PromptTokens),
+				usage.HumanTokens(r.PromptTokens),
+				usage.GroupedInt(r.CompletionTokens),
+				usage.HumanTokens(r.CompletionTokens),
+				usage.GroupedInt(r.TotalTokens),
+				usage.HumanTokens(r.TotalTokens),
+				r.Reason,
+			))
+		}
+		return strings.Join(lines, "\n")
+	case "today":
+		records := al.usageStore.Query(usage.Filter{DayKey: dayKey})
+		if len(records) == 0 {
+			return fmt.Sprintf("No usage records for today (%s) yet.", dayKey)
+		}
+		lines := []string{
+			fmt.Sprintf("Today usage (%s):", dayKey),
+			formatUsageAggregate("Summary", usage.AggregateRecords(records)),
+			"By provider:",
+		}
+		byProvider := usage.ProviderBreakdown(records)
+		providers := make([]string, 0, len(byProvider))
+		for p := range byProvider {
+			providers = append(providers, p)
+		}
+		sort.Strings(providers)
+		for _, p := range providers {
+			lines = append(lines, "  "+formatUsageAggregate(p, byProvider[p]))
+		}
+		return strings.Join(lines, "\n")
+	case "provider":
+		todayRecords := al.usageStore.Query(usage.Filter{DayKey: dayKey})
+		sessionRecords := al.usageStore.Query(usage.Filter{SessionKey: sessionKey})
+		if len(todayRecords) == 0 && len(sessionRecords) == 0 {
+			return "No usage records found yet."
+		}
+		lines := []string{
+			fmt.Sprintf("Provider usage (today %s + session %s):", dayKey, sessionKey),
+			"Today by provider:",
+		}
+		todayByProvider := usage.ProviderBreakdown(todayRecords)
+		sessionByProvider := usage.ProviderBreakdown(sessionRecords)
+		todayKeys := make([]string, 0, len(todayByProvider))
+		for p := range todayByProvider {
+			todayKeys = append(todayKeys, p)
+		}
+		sort.Strings(todayKeys)
+		if len(todayKeys) == 0 {
+			lines = append(lines, "  none")
+		}
+		for _, p := range todayKeys {
+			lines = append(lines, "  "+formatUsageAggregate(p, todayByProvider[p]))
+		}
+		lines = append(lines, "Session by provider:")
+		sessionKeys := make([]string, 0, len(sessionByProvider))
+		for p := range sessionByProvider {
+			sessionKeys = append(sessionKeys, p)
+		}
+		sort.Strings(sessionKeys)
+		if len(sessionKeys) == 0 {
+			lines = append(lines, "  none")
+		}
+		for _, p := range sessionKeys {
+			lines = append(lines, "  "+formatUsageAggregate(p, sessionByProvider[p]))
+		}
+		return strings.Join(lines, "\n")
+	default:
+		todayRecords := al.usageStore.Query(usage.Filter{DayKey: dayKey})
+		sessionRecords := al.usageStore.Query(usage.Filter{SessionKey: sessionKey})
+		last, hasLast := al.usageStore.LastBySession(sessionKey)
+		lines := []string{
+			fmt.Sprintf("Usage dashboard (session=%s, day=%s)", sessionKey, dayKey),
+		}
+		if hasLast {
+			lines = append(lines, fmt.Sprintf(
+				"Last: known=%t in=%s (%s) out=%s (%s) total=%s (%s) provider=%s model=%s reason=%s",
+				last.UsageKnown,
+				usage.GroupedInt(last.PromptTokens),
+				usage.HumanTokens(last.PromptTokens),
+				usage.GroupedInt(last.CompletionTokens),
+				usage.HumanTokens(last.CompletionTokens),
+				usage.GroupedInt(last.TotalTokens),
+				usage.HumanTokens(last.TotalTokens),
+				last.Provider,
+				last.Model,
+				last.Reason,
+			))
+		} else {
+			lines = append(lines, "Last: none")
+		}
+		lines = append(lines, formatUsageAggregate("Session", usage.AggregateRecords(sessionRecords)))
+		lines = append(lines, formatUsageAggregate("Today", usage.AggregateRecords(todayRecords)))
+		byProvider := usage.ProviderBreakdown(todayRecords)
+		if len(byProvider) > 0 {
+			lines = append(lines, "Today by provider:")
+			keys := make([]string, 0, len(byProvider))
+			for p := range byProvider {
+				keys = append(keys, p)
+			}
+			sort.Strings(keys)
+			for _, p := range keys {
+				lines = append(lines, "  "+formatUsageAggregate(p, byProvider[p]))
+			}
+		}
+		lines = append(lines, "Commands: /usage last | /usage session | /usage today | /usage provider")
+		return strings.Join(lines, "\n")
+	}
+}
+
 func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
 	// Verify this is a system message
 	if msg.Channel != "system" {

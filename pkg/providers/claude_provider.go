@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -90,11 +91,17 @@ func (p *ClaudeProvider) GetDefaultModel() string {
 func buildClaudeParams(messages []Message, tools []ToolDefinition, model string, options map[string]interface{}) (anthropic.MessageNewParams, error) {
 	var system []anthropic.TextBlockParam
 	var anthropicMessages []anthropic.MessageParam
+	promptCacheEnabled, promptCacheTTL := claudePromptCacheOptions(options)
 
 	for _, msg := range messages {
 		switch msg.Role {
 		case "system":
-			system = append(system, anthropic.TextBlockParam{Text: msg.Content})
+			block := anthropic.TextBlockParam{Text: msg.Content}
+			if promptCacheEnabled {
+				block.CacheControl = anthropic.NewCacheControlEphemeralParam()
+				block.CacheControl.TTL = promptCacheTTL
+			}
+			system = append(system, block)
 		case "user":
 			if msg.ToolCallID != "" {
 				anthropicMessages = append(anthropicMessages,
@@ -165,6 +172,24 @@ func buildClaudeParams(messages []Message, tools []ToolDefinition, model string,
 	return params, nil
 }
 
+func claudePromptCacheOptions(options map[string]interface{}) (bool, anthropic.CacheControlEphemeralTTL) {
+	enabled := true
+	ttl := anthropic.CacheControlEphemeralTTLTTL1h
+
+	if raw, ok := options["anthropic_prompt_cache"].(bool); ok {
+		enabled = raw
+	}
+	if raw, ok := options["anthropic_prompt_cache_ttl"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "5m":
+			ttl = anthropic.CacheControlEphemeralTTLTTL5m
+		case "1h":
+			ttl = anthropic.CacheControlEphemeralTTLTTL1h
+		}
+	}
+	return enabled, ttl
+}
+
 func translateToolsForClaude(tools []ToolDefinition) []anthropic.ToolUnionParam {
 	result := make([]anthropic.ToolUnionParam, 0, len(tools))
 	for _, t := range tools {
@@ -229,9 +254,9 @@ func parseClaudeResponse(resp *anthropic.Message) *LLMResponse {
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
 		Usage: &UsageInfo{
-			PromptTokens:     int(resp.Usage.InputTokens),
+			PromptTokens:     int(resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens),
 			CompletionTokens: int(resp.Usage.OutputTokens),
-			TotalTokens:      int(resp.Usage.InputTokens + resp.Usage.OutputTokens),
+			TotalTokens:      int(resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.OutputTokens),
 		},
 	}
 }
