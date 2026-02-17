@@ -2,6 +2,7 @@ package providers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -198,6 +199,64 @@ func TestClaudeProvider_GetDefaultModel(t *testing.T) {
 	p := NewClaudeProvider("test-token")
 	if got := p.GetDefaultModel(); got != "claude-sonnet-4-5-20250929" {
 		t.Errorf("GetDefaultModel() = %q, want %q", got, "claude-sonnet-4-5-20250929")
+	}
+}
+
+func TestClaudeProvider_ChatReturnsRateLimitErrorOn429(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_test"}`))
+	}))
+	defer server.Close()
+
+	provider := NewClaudeProvider("test-token")
+	provider.client = createAnthropicTestClient(server.URL, "test-token")
+
+	_, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "claude-sonnet-4-5-20250929", map[string]interface{}{"max_tokens": 1024})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want non-nil")
+	}
+
+	var rlErr *RateLimitError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("Chat() error = %T, want *RateLimitError", err)
+	}
+	if rlErr.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("RateLimitError.StatusCode = %d, want %d", rlErr.StatusCode, http.StatusTooManyRequests)
+	}
+}
+
+func TestClaudeProvider_ChatReturnsRateLimitErrorOn400(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"messages.10.content.1.tool_use.id: String should match pattern '^[a-zA-Z0-9_-]+$'"},"request_id":"req_test"}`))
+	}))
+	defer server.Close()
+
+	provider := NewClaudeProvider("test-token")
+	provider.client = createAnthropicTestClient(server.URL, "test-token")
+
+	_, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "claude-sonnet-4-5-20250929", map[string]interface{}{"max_tokens": 1024})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want non-nil")
+	}
+
+	var rlErr *RateLimitError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("Chat() error = %T, want *RateLimitError", err)
+	}
+	if rlErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("RateLimitError.StatusCode = %d, want %d", rlErr.StatusCode, http.StatusBadRequest)
 	}
 }
 

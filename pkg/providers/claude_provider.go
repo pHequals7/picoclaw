@@ -3,7 +3,9 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -68,6 +70,13 @@ func (p *ClaudeProvider) Chat(ctx context.Context, messages []Message, tools []T
 
 	resp, err := p.client.Messages.New(ctx, params, opts...)
 	if err != nil {
+		var apiErr *anthropic.Error
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode == http.StatusBadRequest) {
+			return nil, &RateLimitError{
+				StatusCode: apiErr.StatusCode,
+				Body:       apiErr.Error(),
+			}
+		}
 		return nil, fmt.Errorf("claude API call: %w", err)
 	}
 
