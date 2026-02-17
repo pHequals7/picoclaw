@@ -436,6 +436,16 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		}
 	}
 
+	if message.ReplyToMessage != nil {
+		replyContext := formatTelegramReplyContext(message.ReplyToMessage)
+		if replyContext != "" {
+			if content != "" {
+				content += "\n"
+			}
+			content += replyContext
+		}
+	}
+
 	if content == "" {
 		content = "[empty message]"
 	}
@@ -667,4 +677,48 @@ func escapeHTML(text string) string {
 	text = strings.ReplaceAll(text, "<", "&lt;")
 	text = strings.ReplaceAll(text, ">", "&gt;")
 	return text
+}
+
+func formatTelegramReplyContext(reply *telego.Message) string {
+	if reply == nil {
+		return ""
+	}
+
+	replyFrom := "unknown"
+	if reply.From != nil {
+		switch {
+		case reply.From.Username != "":
+			replyFrom = "@" + reply.From.Username
+		case reply.From.FirstName != "":
+			replyFrom = reply.From.FirstName
+		default:
+			replyFrom = fmt.Sprintf("user_%d", reply.From.ID)
+		}
+	}
+
+	parts := make([]string, 0, 4)
+	if reply.Text != "" {
+		parts = append(parts, reply.Text)
+	}
+	if reply.Caption != "" {
+		parts = append(parts, reply.Caption)
+	}
+	if reply.Photo != nil && len(reply.Photo) > 0 {
+		parts = append(parts, "[image]")
+	}
+	if reply.Voice != nil {
+		parts = append(parts, "[voice]")
+	}
+	if reply.Audio != nil {
+		parts = append(parts, "[audio]")
+	}
+	if reply.Document != nil {
+		parts = append(parts, "[file]")
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "[non-text message]")
+	}
+
+	replyBody := utils.Truncate(strings.Join(parts, " "), 600)
+	return fmt.Sprintf("[reply_to from=%s id=%d] %s", replyFrom, reply.MessageID, replyBody)
 }
