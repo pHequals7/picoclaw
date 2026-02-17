@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -540,12 +541,50 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 		})
 
 		if err != nil {
-			logger.ErrorCF("agent", "LLM call failed",
-				map[string]interface{}{
-					"iteration": iteration,
-					"error":     err.Error(),
-				})
-			return "", iteration, fmt.Errorf("LLM call failed: %w", err)
+			var rateLimitErr *providers.RateLimitError
+			if errors.As(err, &rateLimitErr) && al.config.Agents.Defaults.FallbackModel != "" {
+				fallbackModel := al.config.Agents.Defaults.FallbackModel
+				logger.WarnCF("agent", "Rate limited, attempting failover",
+					map[string]interface{}{
+						"iteration":      iteration,
+						"fallback_model": fallbackModel,
+					})
+
+				// Notify the user
+				if opts.Channel != "" && opts.ChatID != "" {
+					al.bus.PublishOutbound(bus.OutboundMessage{
+						Channel: opts.Channel,
+						ChatID:  opts.ChatID,
+						Content: fmt.Sprintf("Rate limited by primary provider. Falling back to %s...", fallbackModel),
+					})
+				}
+
+				// Create fallback provider and retry
+				fallbackProvider, fbErr := providers.CreateProviderForModel(al.config, fallbackModel)
+				if fbErr == nil {
+					response, err = fallbackProvider.Chat(ctx, messages, providerToolDefs, fallbackModel, map[string]interface{}{
+						"max_tokens":  8192,
+						"temperature": 0.7,
+					})
+				}
+				if err != nil {
+					logger.ErrorCF("agent", "Fallback LLM call also failed",
+						map[string]interface{}{
+							"iteration":      iteration,
+							"fallback_model": fallbackModel,
+							"error":          err.Error(),
+						})
+				}
+			}
+
+			if err != nil {
+				logger.ErrorCF("agent", "LLM call failed",
+					map[string]interface{}{
+						"iteration": iteration,
+						"error":     err.Error(),
+					})
+				return "", iteration, fmt.Errorf("LLM call failed: %w", err)
+			}
 		}
 
 		// Check if no tool calls - we're done

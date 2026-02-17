@@ -21,6 +21,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+// RateLimitError is returned when the LLM provider responds with 429 Too Many Requests.
+type RateLimitError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("rate limited (status %d): %s", e.StatusCode, e.Body)
+}
+
 type HTTPProvider struct {
 	apiKey     string
 	apiBase    string
@@ -117,6 +127,9 @@ func (p *HTTPProvider) Chat(ctx context.Context, messages []Message, tools []Too
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, &RateLimitError{StatusCode: resp.StatusCode, Body: string(body)}
+		}
 		return nil, fmt.Errorf("API request failed:\n  Status: %d\n  Body:   %s", resp.StatusCode, string(body))
 	}
 
@@ -472,4 +485,19 @@ func CreateProvider(cfg *config.Config) (LLMProvider, error) {
 	}
 
 	return NewHTTPProvider(apiKey, apiBase, proxy), nil
+}
+
+// CreateProviderForModel creates a provider resolved from a specific model name,
+// ignoring the default provider/model in config. Used for failover.
+func CreateProviderForModel(cfg *config.Config, model string) (LLMProvider, error) {
+	// Temporarily override config defaults to resolve provider for the given model
+	origModel := cfg.Agents.Defaults.Model
+	origProvider := cfg.Agents.Defaults.Provider
+	cfg.Agents.Defaults.Model = model
+	cfg.Agents.Defaults.Provider = "" // Force model-name-based detection
+	defer func() {
+		cfg.Agents.Defaults.Model = origModel
+		cfg.Agents.Defaults.Provider = origProvider
+	}()
+	return CreateProvider(cfg)
 }
