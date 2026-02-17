@@ -361,7 +361,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	})
 }
 
-func formatUsageAggregate(label string, agg usage.Aggregate) string {
+func formatUsageAggregatePlain(label string, agg usage.Aggregate) string {
 	return fmt.Sprintf(
 		"%s: calls=%d known=%d unknown=%d in=%s (%s) out=%s (%s) total=%s (%s)",
 		label,
@@ -375,6 +375,21 @@ func formatUsageAggregate(label string, agg usage.Aggregate) string {
 		usage.GroupedInt(agg.TotalTokens),
 		usage.HumanTokens(agg.TotalTokens),
 	)
+}
+
+func formatUsageAggregateTable(label string, agg usage.Aggregate) string {
+	return fmt.Sprintf("| %-14s | %5d | %7s | %6s | %7s |",
+		label,
+		agg.Calls,
+		usage.HumanTokens(agg.PromptTokens),
+		usage.HumanTokens(agg.CompletionTokens),
+		usage.HumanTokens(agg.TotalTokens),
+	)
+}
+
+func usageTableHeader() string {
+	return "| Scope          | Calls |   Input | Output |   Total |\n" +
+		"|----------------|-------|---------|--------|---------|"
 }
 
 func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) string {
@@ -418,7 +433,7 @@ func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) 
 		}
 		lines := []string{
 			fmt.Sprintf("Session usage (%s) latest %d:", sessionKey, len(records)),
-			formatUsageAggregate("Summary", usage.AggregateRecords(records)),
+			formatUsageAggregatePlain("Summary", usage.AggregateRecords(records)),
 		}
 		for _, r := range records {
 			lines = append(lines, fmt.Sprintf(
@@ -444,7 +459,7 @@ func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) 
 		}
 		lines := []string{
 			fmt.Sprintf("Today usage (%s):", dayKey),
-			formatUsageAggregate("Summary", usage.AggregateRecords(records)),
+			formatUsageAggregatePlain("Summary", usage.AggregateRecords(records)),
 			"By provider:",
 		}
 		byProvider := usage.ProviderBreakdown(records)
@@ -454,7 +469,7 @@ func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) 
 		}
 		sort.Strings(providers)
 		for _, p := range providers {
-			lines = append(lines, "  "+formatUsageAggregate(p, byProvider[p]))
+			lines = append(lines, "  "+formatUsageAggregatePlain(p, byProvider[p]))
 		}
 		return strings.Join(lines, "\n")
 	case "provider":
@@ -478,7 +493,7 @@ func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) 
 			lines = append(lines, "  none")
 		}
 		for _, p := range todayKeys {
-			lines = append(lines, "  "+formatUsageAggregate(p, todayByProvider[p]))
+			lines = append(lines, "  "+formatUsageAggregatePlain(p, todayByProvider[p]))
 		}
 		lines = append(lines, "Session by provider:")
 		sessionKeys := make([]string, 0, len(sessionByProvider))
@@ -490,48 +505,47 @@ func (al *AgentLoop) handleUsageCommand(msg bus.InboundMessage, command string) 
 			lines = append(lines, "  none")
 		}
 		for _, p := range sessionKeys {
-			lines = append(lines, "  "+formatUsageAggregate(p, sessionByProvider[p]))
+			lines = append(lines, "  "+formatUsageAggregatePlain(p, sessionByProvider[p]))
 		}
 		return strings.Join(lines, "\n")
 	default:
 		todayRecords := al.usageStore.Query(usage.Filter{DayKey: dayKey})
 		sessionRecords := al.usageStore.Query(usage.Filter{SessionKey: sessionKey})
 		last, hasLast := al.usageStore.LastBySession(sessionKey)
-		lines := []string{
-			fmt.Sprintf("Usage dashboard (session=%s, day=%s)", sessionKey, dayKey),
-		}
+		// Header
+		lastLine := "Last: none"
 		if hasLast {
-			lines = append(lines, fmt.Sprintf(
-				"Last: known=%t in=%s (%s) out=%s (%s) total=%s (%s) provider=%s model=%s reason=%s",
-				last.UsageKnown,
-				usage.GroupedInt(last.PromptTokens),
-				usage.HumanTokens(last.PromptTokens),
-				usage.GroupedInt(last.CompletionTokens),
-				usage.HumanTokens(last.CompletionTokens),
-				usage.GroupedInt(last.TotalTokens),
-				usage.HumanTokens(last.TotalTokens),
-				last.Provider,
+			lastLine = fmt.Sprintf("Last call: `%s` · %s · %s in / %s out",
 				last.Model,
-				last.Reason,
-			))
-		} else {
-			lines = append(lines, "Last: none")
+				last.Provider,
+				usage.HumanTokens(last.PromptTokens),
+				usage.HumanTokens(last.CompletionTokens),
+			)
 		}
-		lines = append(lines, formatUsageAggregate("Session", usage.AggregateRecords(sessionRecords)))
-		lines = append(lines, formatUsageAggregate("Today", usage.AggregateRecords(todayRecords)))
+		sessionAgg := usage.AggregateRecords(sessionRecords)
+		todayAgg := usage.AggregateRecords(todayRecords)
+		lines := []string{
+			fmt.Sprintf("**Usage Dashboard** · %s · `%s`", dayKey, sessionKey),
+			"",
+			lastLine,
+			"",
+			usageTableHeader(),
+			formatUsageAggregateTable("This session", sessionAgg),
+			formatUsageAggregateTable("Today", todayAgg),
+		}
 		byProvider := usage.ProviderBreakdown(todayRecords)
 		if len(byProvider) > 0 {
-			lines = append(lines, "Today by provider:")
 			keys := make([]string, 0, len(byProvider))
 			for p := range byProvider {
 				keys = append(keys, p)
 			}
 			sort.Strings(keys)
 			for _, p := range keys {
-				lines = append(lines, "  "+formatUsageAggregate(p, byProvider[p]))
+				lines = append(lines, formatUsageAggregateTable("  └ "+p, byProvider[p]))
 			}
 		}
-		lines = append(lines, "Commands: /usage last | /usage session | /usage today | /usage provider")
+		lines = append(lines, "")
+		lines = append(lines, "_/usage last · session · today · provider_")
 		return strings.Join(lines, "\n")
 	}
 }
