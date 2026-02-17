@@ -273,6 +273,17 @@ func (c *TelegramChannel) sendMediaFiles(ctx context.Context, chatID int64, capt
 			params.Caption = fileCaption
 			_, err = c.bot.SendVideo(ctx, params)
 
+		case strings.HasSuffix(filePath, ".voice.ogg"):
+			// Send as Telegram voice note (voice bubble), not audio file
+			params := &telego.SendVoiceParams{
+				ChatID: tu.ID(chatID),
+				Voice:  telego.InputFile{File: f},
+			}
+			if fileCaption != "" {
+				params.Caption = fileCaption
+			}
+			_, err = c.bot.SendVoice(ctx, params)
+
 		case ext == ".mp3" || ext == ".ogg" || ext == ".wav" || ext == ".m4a" || ext == ".flac":
 			params := tu.Audio(tu.ID(chatID), tu.File(f))
 			params.Caption = fileCaption
