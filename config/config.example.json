@@ -4,9 +4,23 @@
       "workspace": "~/.picoclaw/workspace",
       "restrict_to_workspace": true,
       "model": "glm-4.7",
+      "fallback_model": "gpt-5-mini",
+      "fallback_models": ["gpt-5-mini", "gemini-2.5-flash"],
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20
+    },
+    "failover": {
+      "enabled": true,
+      "hold_minutes": 300,
+      "probe_interval_minutes": 5,
+      "probe_success_threshold": 2,
+      "probe_failure_backoff_minutes": 10,
+      "notify_on_switch": true,
+      "notify_on_fallback_use": true,
+      "switchback_requires_approval": true,
+      "switchback_prompt_cooldown_minutes": 60,
+      "switchback_prompt_timeout_minutes": 0
     }
   },
   "channels": {

@@ -58,16 +58,32 @@ type Config struct {
 
 type AgentsConfig struct {
 	Defaults AgentDefaults `json:"defaults"`
+	Failover AgentFailover `json:"failover"`
 }
 
 type AgentDefaults struct {
-	Workspace           string  `json:"workspace" env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
-	RestrictToWorkspace bool    `json:"restrict_to_workspace" env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
-	Provider            string  `json:"provider" env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
-	Model               string  `json:"model" env:"PICOCLAW_AGENTS_DEFAULTS_MODEL"`
-	MaxTokens           int     `json:"max_tokens" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
-	Temperature         float64 `json:"temperature" env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
-	MaxToolIterations   int     `json:"max_tool_iterations" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	Workspace           string   `json:"workspace" env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	RestrictToWorkspace bool     `json:"restrict_to_workspace" env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
+	Provider            string   `json:"provider" env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
+	Model               string   `json:"model" env:"PICOCLAW_AGENTS_DEFAULTS_MODEL"`
+	MaxTokens           int      `json:"max_tokens" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
+	Temperature         float64  `json:"temperature" env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
+	MaxToolIterations   int      `json:"max_tool_iterations" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	FallbackModel       string   `json:"fallback_model" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODEL"`
+	FallbackModels      []string `json:"fallback_models" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODELS"`
+}
+
+type AgentFailover struct {
+	Enabled                      bool `json:"enabled" env:"PICOCLAW_AGENTS_FAILOVER_ENABLED"`
+	HoldMinutes                  int  `json:"hold_minutes" env:"PICOCLAW_AGENTS_FAILOVER_HOLD_MINUTES"`
+	ProbeIntervalMinutes         int  `json:"probe_interval_minutes" env:"PICOCLAW_AGENTS_FAILOVER_PROBE_INTERVAL_MINUTES"`
+	ProbeSuccessThreshold        int  `json:"probe_success_threshold" env:"PICOCLAW_AGENTS_FAILOVER_PROBE_SUCCESS_THRESHOLD"`
+	ProbeFailureBackoffMinutes   int  `json:"probe_failure_backoff_minutes" env:"PICOCLAW_AGENTS_FAILOVER_PROBE_FAILURE_BACKOFF_MINUTES"`
+	NotifyOnSwitch               bool `json:"notify_on_switch" env:"PICOCLAW_AGENTS_FAILOVER_NOTIFY_ON_SWITCH"`
+	NotifyOnFallbackUse          bool `json:"notify_on_fallback_use" env:"PICOCLAW_AGENTS_FAILOVER_NOTIFY_ON_FALLBACK_USE"`
+	SwitchbackRequiresApproval   bool `json:"switchback_requires_approval" env:"PICOCLAW_AGENTS_FAILOVER_SWITCHBACK_REQUIRES_APPROVAL"`
+	SwitchbackPromptCooldownMins int  `json:"switchback_prompt_cooldown_minutes" env:"PICOCLAW_AGENTS_FAILOVER_SWITCHBACK_PROMPT_COOLDOWN_MINUTES"`
+	SwitchbackPromptTimeoutMins  int  `json:"switchback_prompt_timeout_minutes" env:"PICOCLAW_AGENTS_FAILOVER_SWITCHBACK_PROMPT_TIMEOUT_MINUTES"`
 }
 
 type ChannelsConfig struct {
@@ -264,6 +280,18 @@ func DefaultConfig() *Config {
 				MaxTokens:           8192,
 				Temperature:         0.7,
 				MaxToolIterations:   20,
+			},
+			Failover: AgentFailover{
+				Enabled:                      true,
+				HoldMinutes:                  300,
+				ProbeIntervalMinutes:         5,
+				ProbeSuccessThreshold:        2,
+				ProbeFailureBackoffMinutes:   10,
+				NotifyOnSwitch:               true,
+				NotifyOnFallbackUse:          true,
+				SwitchbackRequiresApproval:   true,
+				SwitchbackPromptCooldownMins: 60,
+				SwitchbackPromptTimeoutMins:  0,
 			},
 		},
 		Channels: ChannelsConfig{

@@ -214,3 +214,29 @@ func TestNewManager_EmptyWorkspace(t *testing.T) {
 		t.Error("Expected zero timestamp for new state")
 	}
 }
+
+func TestSetFailoverStatePersistence(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "state-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sm := NewManager(tmpDir)
+	fs := FailoverState{
+		Mode:          "degraded",
+		PrimaryModel:  "claude-sonnet-4-5-20250929",
+		ActiveModel:   "gpt-5-mini",
+		FallbackIndex: 0,
+		SwitchEpoch:   3,
+	}
+	if err := sm.SetFailoverState(fs); err != nil {
+		t.Fatalf("SetFailoverState failed: %v", err)
+	}
+
+	sm2 := NewManager(tmpDir)
+	got := sm2.GetFailoverState()
+	if got.ActiveModel != "gpt-5-mini" || got.Mode != "degraded" || got.SwitchEpoch != 3 {
+		t.Fatalf("unexpected failover state after reload: %+v", got)
+	}
+}
