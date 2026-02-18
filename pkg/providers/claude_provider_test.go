@@ -125,6 +125,36 @@ func TestBuildClaudeParams_WithTools(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeParams_WithToolsRequiredAsStringSlice(t *testing.T) {
+	tools := []ToolDefinition{
+		{
+			Type: "function",
+			Function: ToolFunctionDefinition{
+				Name:        "run_command",
+				Description: "Run a shell command",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"command": map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"command"},
+				},
+			},
+		},
+	}
+
+	params, err := buildClaudeParams([]Message{{Role: "user", Content: "Hi"}}, tools, "claude-sonnet-4-5-20250929", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("buildClaudeParams() error: %v", err)
+	}
+	if len(params.Tools) != 1 {
+		t.Fatalf("len(Tools) = %d, want 1", len(params.Tools))
+	}
+	if len(params.Tools[0].OfTool.InputSchema.Required) != 1 || params.Tools[0].OfTool.InputSchema.Required[0] != "command" {
+		t.Fatalf("Required = %v, want [command]", params.Tools[0].OfTool.InputSchema.Required)
+	}
+}
+
 func TestParseClaudeResponse_TextOnly(t *testing.T) {
 	resp := &anthropic.Message{
 		Content: []anthropic.ContentBlockUnion{},
