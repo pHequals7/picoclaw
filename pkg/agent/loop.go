@@ -861,10 +861,19 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 
 			planMsg := formatExecutionPlanProgress(planState.Bullets)
 			if opts.Channel != "" && opts.ChatID != "" {
+				// Send the plan as a regular message so it remains persistent in chat.
+				// Telegram channel logic will finalize the current placeholder for this message.
 				al.bus.PublishOutbound(bus.OutboundMessage{
 					Channel:          opts.Channel,
 					ChatID:           opts.ChatID,
 					Content:          planMsg,
+					IsProgressUpdate: false,
+				})
+				// Immediately start a second message dedicated to streaming progress updates.
+				al.bus.PublishOutbound(bus.OutboundMessage{
+					Channel:          opts.Channel,
+					ChatID:           opts.ChatID,
+					Content:          "Working... 🔧",
 					IsProgressUpdate: true,
 				})
 			}
