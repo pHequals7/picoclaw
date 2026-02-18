@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/attachments"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
@@ -65,6 +66,7 @@ type processOptions struct {
 // This is shared between main agent and subagents.
 func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msgBus *bus.MessageBus) *tools.ToolRegistry {
 	registry := tools.NewToolRegistry()
+	attachmentStore := attachments.NewStore(workspace)
 
 	// File system tools
 	registry.Register(tools.NewReadFileTool(workspace, restrict))
@@ -72,6 +74,7 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	registry.Register(tools.NewListDirTool(workspace, restrict))
 	registry.Register(tools.NewEditFileTool(workspace, restrict))
 	registry.Register(tools.NewAppendFileTool(workspace, restrict))
+	registry.Register(tools.NewImportAttachmentTool(workspace, restrict, attachmentStore))
 
 	// Shell execution
 	registry.Register(tools.NewExecTool(workspace, restrict))
