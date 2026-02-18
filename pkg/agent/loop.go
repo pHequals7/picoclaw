@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/usage"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -42,6 +44,7 @@ type AgentLoop struct {
 	state          *state.Manager
 	contextBuilder *ContextBuilder
 	tools          *tools.ToolRegistry
+	usageStore     *usage.Store
 	config         *config.Config
 	running        atomic.Bool
 	summarizing    sync.Map // Tracks which sessions are currently being summarized
@@ -188,6 +191,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		state:          stateManager,
 		contextBuilder: contextBuilder,
 		tools:          toolsRegistry,
+		usageStore:     usage.NewStore(filepath.Join(workspace, "usage")),
 		config:         cfg,
 		summarizing:    sync.Map{},
 	}
@@ -341,6 +345,11 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	// Route system messages to processSystemMessage
 	if msg.Channel == "system" {
 		return al.processSystemMessage(ctx, msg)
+	}
+
+	trimmed := strings.TrimSpace(msg.Content)
+	if strings.HasPrefix(trimmed, "/usage") {
+		return al.handleUsageCommand(msg, trimmed), nil
 	}
 
 	// Create ActionStream for visibility if enabled
@@ -787,6 +796,37 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			return "", iteration, fmt.Errorf("LLM call failed: %w", err)
 		}
 
+		if al.usageStore != nil {
+			usageKnown := response.Usage != nil
+			promptTokens := 0
+			completionTokens := 0
+			totalTokens := 0
+			if usageKnown {
+				promptTokens = response.Usage.PromptTokens
+				completionTokens = response.Usage.CompletionTokens
+				totalTokens = response.Usage.TotalTokens
+			}
+			if totalTokens == 0 {
+				totalTokens = promptTokens + completionTokens
+			}
+			reason := strings.TrimSpace(response.FinishReason)
+			if reason == "" {
+				reason = "normal_call"
+			}
+			al.usageStore.Add(usage.Record{
+				Timestamp:        time.Now().UTC(),
+				SessionKey:       opts.SessionKey,
+				DayKey:           time.Now().UTC().Format("2006-01-02"),
+				Provider:         providerFromModel(al.model),
+				Model:            al.model,
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      totalTokens,
+				UsageKnown:       usageKnown,
+				Reason:           reason,
+			})
+		}
+
 		// Check if no tool calls - we're done
 		if len(response.ToolCalls) == 0 {
 			finalContent = response.Content
@@ -915,6 +955,22 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 	}
 
 	return finalContent, iteration, nil
+}
+
+func providerFromModel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.Contains(m, "claude"), strings.Contains(m, "anthropic"):
+		return "anthropic"
+	case strings.Contains(m, "gpt"), strings.Contains(m, "openai"):
+		return "openai"
+	case strings.Contains(m, "gemini"), strings.Contains(m, "google"):
+		return "google"
+	case strings.Contains(m, "deepseek"):
+		return "deepseek"
+	default:
+		return "unknown"
+	}
 }
 
 // updateToolContexts updates the context for tools that need channel/chatID info.
