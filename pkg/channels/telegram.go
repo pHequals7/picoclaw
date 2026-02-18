@@ -15,6 +15,7 @@ import (
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 
+	"github.com/sipeed/picoclaw/pkg/attachments"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -24,12 +25,13 @@ import (
 
 type TelegramChannel struct {
 	*BaseChannel
-	bot          *telego.Bot
-	config       config.TelegramConfig
-	chatIDs      map[string]int64
-	transcriber  *voice.GroqTranscriber
-	placeholders sync.Map // chatID -> messageID
-	stopThinking sync.Map // chatID -> thinkingCancel
+	bot             *telego.Bot
+	config          config.TelegramConfig
+	chatIDs         map[string]int64
+	transcriber     *voice.GroqTranscriber
+	attachmentStore *attachments.Store
+	placeholders    sync.Map // chatID -> messageID
+	stopThinking    sync.Map // chatID -> thinkingCancel
 }
 
 type thinkingCancel struct {
@@ -42,7 +44,9 @@ func (c *thinkingCancel) Cancel() {
 	}
 }
 
-func NewTelegramChannel(cfg config.TelegramConfig, bus *bus.MessageBus) (*TelegramChannel, error) {
+const telegramAttachmentMaxBytes int64 = 100 * 1024 * 1024 // 100 MB
+
+func NewTelegramChannel(cfg config.TelegramConfig, bus *bus.MessageBus, workspace string) (*TelegramChannel, error) {
 	var opts []telego.BotOption
 
 	if cfg.Proxy != "" {
@@ -65,13 +69,14 @@ func NewTelegramChannel(cfg config.TelegramConfig, bus *bus.MessageBus) (*Telegr
 	base := NewBaseChannel("telegram", cfg, bus, cfg.AllowFrom)
 
 	return &TelegramChannel{
-		BaseChannel:  base,
-		bot:          bot,
-		config:       cfg,
-		chatIDs:      make(map[string]int64),
-		transcriber:  nil,
-		placeholders: sync.Map{},
-		stopThinking: sync.Map{},
+		BaseChannel:     base,
+		bot:             bot,
+		config:          cfg,
+		chatIDs:         make(map[string]int64),
+		transcriber:     nil,
+		attachmentStore: attachments.NewStore(workspace),
+		placeholders:    sync.Map{},
+		stopThinking:    sync.Map{},
 	}, nil
 }
 
@@ -328,6 +333,8 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 
 	content := ""
 	mediaPaths := []string{}
+	attachmentIDs := []string{}
+	attachmentMarkers := []string{}
 	localFiles := []string{} // 跟踪需要清理的本地文件
 
 	// 确保临时文件在函数返回时被清理
@@ -353,10 +360,84 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		content += message.Caption
 	}
 
+	saveAttachment := func(localPath, originalName, mimeType, kind string, persist bool) {
+		info, err := os.Stat(localPath)
+		if err != nil {
+			logger.ErrorCF("telegram", "Failed to stat downloaded attachment", map[string]interface{}{
+				"path":  localPath,
+				"error": err.Error(),
+			})
+			return
+		}
+		if info.Size() > telegramAttachmentMaxBytes {
+			attachmentMarkers = append(attachmentMarkers, fmt.Sprintf(
+				"[attachment_rejected reason=size_limit name=%s size=%d limit=%d]",
+				utils.SanitizeFilename(originalName),
+				info.Size(),
+				telegramAttachmentMaxBytes,
+			))
+			c.notifyAttachmentStatus(ctx, chatID, fmt.Sprintf("Attachment rejected (over 100 MB): %s", utils.SanitizeFilename(originalName)))
+			return
+		}
+		if !persist {
+			attachmentMarkers = append(attachmentMarkers, fmt.Sprintf(
+				"[attachment_notice kind=%s name=%s size=%d note=transcribed_only]",
+				kind,
+				utils.SanitizeFilename(originalName),
+				info.Size(),
+			))
+			return
+		}
+
+		rec, err := c.attachmentStore.SaveFromLocalFile(
+			"telegram",
+			fmt.Sprintf("%d", chatID),
+			fmt.Sprintf("%d", user.ID),
+			fmt.Sprintf("%d", message.MessageID),
+			originalName,
+			mimeType,
+			kind,
+			localPath,
+		)
+		if err != nil {
+			logger.ErrorCF("telegram", "Failed to persist attachment", map[string]interface{}{
+				"path":  localPath,
+				"name":  originalName,
+				"error": err.Error(),
+			})
+			attachmentMarkers = append(attachmentMarkers, fmt.Sprintf(
+				"[attachment_store_failed name=%s kind=%s]",
+				utils.SanitizeFilename(originalName),
+				kind,
+			))
+			return
+		}
+
+		attachmentIDs = append(attachmentIDs, rec.ID)
+		attachmentMarkers = append(attachmentMarkers, fmt.Sprintf(
+			"[attachment_saved id=%s name=%s size=%d path=%s mime=%s kind=%s]",
+			rec.ID,
+			rec.Name,
+			rec.SizeBytes,
+			rec.StoredPath,
+			rec.MIMEType,
+			rec.Kind,
+		))
+		c.notifyAttachmentStatus(ctx, chatID, fmt.Sprintf(
+			"Saved attachment `%s` (%s, %d bytes)\nID: `%s`\nPath: `%s`\nNote: content is not auto-read; use import_attachment to bring it into workspace.",
+			rec.Name,
+			rec.MIMEType,
+			rec.SizeBytes,
+			rec.ID,
+			rec.StoredPath,
+		))
+	}
+
 	if message.Photo != nil && len(message.Photo) > 0 {
 		photo := message.Photo[len(message.Photo)-1]
 		photoPath := c.downloadPhoto(ctx, photo.FileID)
 		if photoPath != "" {
+			saveAttachment(photoPath, fmt.Sprintf("photo_%s.jpg", photo.FileID), "image/jpeg", "photo", true)
 			// Don't add to localFiles — agent cleanup handles image removal after encoding
 			mediaPaths = append(mediaPaths, photoPath)
 			if content != "" {
@@ -370,7 +451,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		voicePath := c.downloadFile(ctx, message.Voice.FileID, ".ogg")
 		if voicePath != "" {
 			localFiles = append(localFiles, voicePath)
-			mediaPaths = append(mediaPaths, voicePath)
+			saveAttachment(voicePath, fmt.Sprintf("voice_%s.ogg", message.Voice.FileID), "audio/ogg", "voice", false)
 
 			transcribedText := ""
 			if c.transcriber != nil && c.transcriber.IsAvailable() {
@@ -405,7 +486,11 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		audioPath := c.downloadFile(ctx, message.Audio.FileID, ".mp3")
 		if audioPath != "" {
 			localFiles = append(localFiles, audioPath)
-			mediaPaths = append(mediaPaths, audioPath)
+			audioName := message.Audio.FileName
+			if audioName == "" {
+				audioName = fmt.Sprintf("audio_%s.mp3", message.Audio.FileID)
+			}
+			saveAttachment(audioPath, audioName, message.Audio.MimeType, "audio", true)
 			if content != "" {
 				content += "\n"
 			}
@@ -417,7 +502,11 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		docPath := c.downloadFile(ctx, message.Document.FileID, "")
 		if docPath != "" {
 			localFiles = append(localFiles, docPath)
-			mediaPaths = append(mediaPaths, docPath)
+			docName := message.Document.FileName
+			if docName == "" {
+				docName = fmt.Sprintf("document_%s", message.Document.FileID)
+			}
+			saveAttachment(docPath, docName, message.Document.MimeType, "document", true)
 			if content != "" {
 				content += "\n"
 			}
@@ -433,6 +522,13 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 			}
 			content += replyContext
 		}
+	}
+
+	if len(attachmentMarkers) > 0 {
+		if content != "" {
+			content += "\n"
+		}
+		content += strings.Join(attachmentMarkers, "\n")
 	}
 
 	if content == "" {
@@ -478,6 +574,9 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		"first_name": user.FirstName,
 		"is_group":   fmt.Sprintf("%t", message.Chat.Type != "private"),
 	}
+	if len(attachmentIDs) > 0 {
+		metadata["attachment_ids"] = strings.Join(attachmentIDs, ",")
+	}
 
 	c.HandleMessage(senderID, fmt.Sprintf("%d", chatID), content, mediaPaths, metadata)
 }
@@ -522,6 +621,18 @@ func (c *TelegramChannel) downloadFile(ctx context.Context, fileID, ext string) 
 	}
 
 	return c.downloadFileWithInfo(file, ext)
+}
+
+func (c *TelegramChannel) notifyAttachmentStatus(ctx context.Context, chatID int64, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if _, err := c.bot.SendMessage(ctx, tu.Message(tu.ID(chatID), text)); err != nil {
+		logger.WarnCF("telegram", "Failed to send attachment status message", map[string]interface{}{
+			"chat_id": chatID,
+			"error":   err.Error(),
+		})
+	}
 }
 
 func parseChatID(chatIDStr string) (int64, error) {
