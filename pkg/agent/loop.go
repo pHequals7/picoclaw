@@ -748,6 +748,7 @@ func isPathWithin(path, dir string) bool {
 func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.Message, opts processOptions) (string, int, error) {
 	iteration := 0
 	var finalContent string
+	planState := newExecutionPlanState()
 
 	for iteration < al.maxIterations {
 		iteration++
@@ -851,6 +852,31 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				"correlation_id": opts.CorrelationID,
 			})
 
+		// Plan+execute mode: first tool-call batch becomes explicit user-visible plan.
+		// Persist plan into model context so execution remains aligned with announced intent.
+		if !planState.Announced {
+			planState.Bullets = buildExecutionPlanBullets(response.ToolCalls)
+			planState.absorbToolCalls(response.ToolCalls)
+			planState.Announced = true
+
+			planMsg := formatExecutionPlanProgress(planState.Bullets)
+			if opts.Channel != "" && opts.ChatID != "" {
+				al.bus.PublishOutbound(bus.OutboundMessage{
+					Channel:          opts.Channel,
+					ChatID:           opts.ChatID,
+					Content:          planMsg,
+					IsProgressUpdate: true,
+				})
+			}
+
+			planContext := providers.Message{
+				Role:    "assistant",
+				Content: formatPlanContextMessage(planState.Bullets),
+			}
+			messages = append(messages, planContext)
+			al.sessions.AddFullMessage(opts.SessionKey, planContext)
+		}
+
 		// Build assistant message with tool calls
 		assistantMsg := providers.Message{
 			Role:    "assistant",
@@ -874,6 +900,36 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 
 		// Execute tool calls
 		for _, tc := range response.ToolCalls {
+			// If model introduces out-of-plan tool families, announce and persist plan update first.
+			tcName := strings.TrimSpace(tc.Name)
+			if tcName == "" && tc.Function != nil {
+				tcName = strings.TrimSpace(tc.Function.Name)
+			}
+			if planState.Announced && tcName != "" && !planState.isAllowedTool(tcName) {
+				updateStep := summarizeToolCallForPlan(tc)
+				if len(planState.Bullets) < maxPlanBullets {
+					planState.Bullets = append(planState.Bullets, updateStep)
+				}
+				planState.Allowed[tcName] = struct{}{}
+
+				updateMsg := formatPlanUpdateProgress(updateStep)
+				if opts.Channel != "" && opts.ChatID != "" {
+					al.bus.PublishOutbound(bus.OutboundMessage{
+						Channel:          opts.Channel,
+						ChatID:           opts.ChatID,
+						Content:          updateMsg,
+						IsProgressUpdate: true,
+					})
+				}
+
+				updateContext := providers.Message{
+					Role:    "assistant",
+					Content: "Plan update: " + updateStep,
+				}
+				messages = append(messages, updateContext)
+				al.sessions.AddFullMessage(opts.SessionKey, updateContext)
+			}
+
 			// Log tool call with arguments preview
 			argsJSON, _ := json.Marshal(tc.Arguments)
 			argsPreview := utils.Truncate(string(argsJSON), 200)
