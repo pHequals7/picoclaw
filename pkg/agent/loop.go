@@ -925,14 +925,15 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 		// Plan+execute mode: first tool-call batch becomes explicit user-visible plan.
 		// Persist the plan as a workspace artifact and publish it to chat.
 		if !planState.Announced {
-			planState.Bullets = buildExecutionPlanBullets(response.ToolCalls)
+			planModel := activeModel
+			planState.Bullets, planModel = al.generateExecutionPlanBullets(ctx, opts, activeModel, activeProvider, response.ToolCalls)
 			planState.absorbToolCalls(response.ToolCalls)
 			planState.Announced = true
 
 			planPath, planErr := writeExecutionPlanFile(al.workspace, planState.Bullets, planFileMetadata{
 				SessionKey:    opts.SessionKey,
 				CorrelationID: opts.CorrelationID,
-				Model:         activeModel,
+				Model:         planModel,
 			}, time.Now())
 			if planErr != nil {
 				logger.WarnCF("agent", "Failed to persist execution plan file",
@@ -969,6 +970,12 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 					IsProgressUpdate: true,
 				})
 			}
+
+			// Keep the plan in context as a soft execution guardrail for subsequent model turns.
+			messages = append(messages, providers.Message{
+				Role:    "system",
+				Content: formatPlanContextMessage(planState.Bullets),
+			})
 		}
 
 		// Build assistant message with tool calls
@@ -1001,9 +1008,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			}
 			if planState.Announced && tcName != "" && !planState.isAllowedTool(tcName) {
 				updateStep := summarizeToolCallForPlan(tc)
-				if len(planState.Bullets) < maxPlanBullets {
-					planState.Bullets = append(planState.Bullets, updateStep)
-				}
+				planState.Bullets = append(planState.Bullets, updateStep)
 				planState.Allowed[tcName] = struct{}{}
 
 				updateMsg := formatPlanUpdateProgress(updateStep)
@@ -1015,6 +1020,11 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 						IsProgressUpdate: true,
 					})
 				}
+
+				messages = append(messages, providers.Message{
+					Role:    "system",
+					Content: formatPlanContextMessage(planState.Bullets),
+				})
 
 			}
 
