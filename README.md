@@ -1,4 +1,5 @@
 # PicoClaw (pHequals7 Fork)
+![Pico AIyer](./assets/PICOAIYER.png)
 
 A Go-based personal AI agent focused on chat-first operations, tool execution, and resilient model routing.
 
