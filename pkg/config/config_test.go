@@ -183,6 +183,12 @@ func TestConfig_Complete(t *testing.T) {
 	if cfg.Agents.Failover.HoldMinutes == 0 {
 		t.Error("Failover hold window should have default value")
 	}
+	if !cfg.Agents.Planner.Enabled {
+		t.Error("Planner should be enabled by default")
+	}
+	if cfg.Agents.Planner.Model == "" {
+		t.Error("Planner model should have default value")
+	}
 }
 
 func TestApplyProviderEnvOverrides(t *testing.T) {

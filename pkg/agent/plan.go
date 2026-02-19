@@ -12,11 +12,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-const (
-	minPlanBullets = 4
-	maxPlanBullets = 6
-)
-
 type executionPlanState struct {
 	Announced bool
 	Bullets   []string
@@ -49,7 +44,7 @@ func (s *executionPlanState) isAllowedTool(name string) bool {
 
 func buildExecutionPlanBullets(toolCalls []providers.ToolCall) []string {
 	seen := make(map[string]struct{})
-	bullets := make([]string, 0, maxPlanBullets)
+	bullets := make([]string, 0, len(toolCalls))
 
 	for _, tc := range toolCalls {
 		step := summarizeToolCallForPlan(tc)
@@ -61,30 +56,6 @@ func buildExecutionPlanBullets(toolCalls []providers.ToolCall) []string {
 		}
 		seen[step] = struct{}{}
 		bullets = append(bullets, step)
-		if len(bullets) >= maxPlanBullets-1 {
-			break
-		}
-	}
-
-	// Ensure stable 4-6 bullets for trust/readability.
-	defaults := []string{
-		"Validate intermediate results",
-		"Retry failed steps if needed",
-		"Summarize outcome and next actions",
-	}
-	for _, d := range defaults {
-		if len(bullets) >= minPlanBullets {
-			break
-		}
-		bullets = append(bullets, d)
-	}
-	if len(bullets) == 0 {
-		bullets = []string{
-			"Inspect the request context",
-			"Execute required tools in sequence",
-			"Validate intermediate results",
-			"Summarize outcome and next actions",
-		}
 	}
 	return bullets
 }
@@ -95,7 +66,7 @@ func formatExecutionPlanProgress(bullets []string) string {
 
 func formatExecutionPlanProgressWithArtifact(bullets []string, planPath string) string {
 	if len(bullets) == 0 {
-		return "Plan:\n1. Analyze request\n2. Execute required actions\n3. Validate results\n4. Respond with outcome"
+		return "Execution plan:\n- (planner returned no steps)"
 	}
 
 	lines := []string{"Execution plan:"}
@@ -119,6 +90,47 @@ func formatPlanContextMessage(bullets []string) string {
 
 func formatPlanUpdateProgress(step string) string {
 	return fmt.Sprintf("Plan update:\n- %s", step)
+}
+
+func parseExecutionPlanBullets(raw string) []string {
+	lines := strings.Split(raw, "\n")
+	bullets := make([]string, 0, len(lines))
+	seen := make(map[string]struct{})
+
+	for _, line := range lines {
+		v := strings.TrimSpace(line)
+		if v == "" {
+			continue
+		}
+		lower := strings.ToLower(v)
+		if strings.Contains(lower, "execution plan") || strings.Contains(lower, "plan file:") || strings.Contains(lower, "note:") {
+			continue
+		}
+		if numberedPlanPrefix.MatchString(v) {
+			v = numberedPlanPrefix.ReplaceAllString(v, "")
+		} else if bulletPlanPrefix.MatchString(v) {
+			v = bulletPlanPrefix.ReplaceAllString(v, "")
+		} else {
+			// Skip plain prose lines. We only accept explicit bullets/numbered steps.
+			continue
+		}
+
+		v = strings.Trim(strings.TrimSpace(v), "`*_")
+		if v == "" {
+			continue
+		}
+		if len(v) > 120 {
+			v = strings.TrimSpace(v[:120])
+		}
+		key := strings.ToLower(v)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		bullets = append(bullets, v)
+	}
+
+	return bullets
 }
 
 type planFileMetadata struct {
@@ -180,6 +192,8 @@ func firstNonEmptyPlanStep(bullets []string) string {
 }
 
 var nonSlugChars = regexp.MustCompile(`[^a-z0-9]+`)
+var numberedPlanPrefix = regexp.MustCompile(`^\d+\s*[\).\-\:]\s+`)
+var bulletPlanPrefix = regexp.MustCompile(`^[-*•]\s+`)
 
 func slugifyPlanTitle(v string) string {
 	s := strings.ToLower(strings.TrimSpace(v))

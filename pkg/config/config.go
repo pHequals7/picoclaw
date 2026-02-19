@@ -60,6 +60,7 @@ type Config struct {
 type AgentsConfig struct {
 	Defaults AgentDefaults `json:"defaults"`
 	Failover AgentFailover `json:"failover"`
+	Planner  AgentPlanner  `json:"planner"`
 }
 
 type AgentDefaults struct {
@@ -85,6 +86,11 @@ type AgentFailover struct {
 	SwitchbackRequiresApproval   bool `json:"switchback_requires_approval" env:"PICOCLAW_AGENTS_FAILOVER_SWITCHBACK_REQUIRES_APPROVAL"`
 	SwitchbackPromptCooldownMins int  `json:"switchback_prompt_cooldown_minutes" env:"PICOCLAW_AGENTS_FAILOVER_SWITCHBACK_PROMPT_COOLDOWN_MINUTES"`
 	SwitchbackPromptTimeoutMins  int  `json:"switchback_prompt_timeout_minutes" env:"PICOCLAW_AGENTS_FAILOVER_SWITCHBACK_PROMPT_TIMEOUT_MINUTES"`
+}
+
+type AgentPlanner struct {
+	Enabled bool   `json:"enabled" env:"PICOCLAW_AGENTS_PLANNER_ENABLED"`
+	Model   string `json:"model" env:"PICOCLAW_AGENTS_PLANNER_MODEL"`
 }
 
 type ChannelsConfig struct {
@@ -293,6 +299,10 @@ func DefaultConfig() *Config {
 				SwitchbackRequiresApproval:   true,
 				SwitchbackPromptCooldownMins: 60,
 				SwitchbackPromptTimeoutMins:  0,
+			},
+			Planner: AgentPlanner{
+				Enabled: true,
+				Model:   "gpt-5.1-mini",
 			},
 		},
 		Channels: ChannelsConfig{

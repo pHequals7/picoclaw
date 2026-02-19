@@ -10,14 +10,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-func TestBuildExecutionPlanBullets_CountBounds(t *testing.T) {
+func TestBuildExecutionPlanBullets_NoDefaultPadding(t *testing.T) {
 	calls := []providers.ToolCall{
 		{Name: "read_file", Arguments: map[string]interface{}{"path": "/tmp/a.txt"}},
 		{Name: "exec", Arguments: map[string]interface{}{"command": "rg foo ."}},
 	}
 
 	bullets := buildExecutionPlanBullets(calls)
-	if len(bullets) < minPlanBullets || len(bullets) > maxPlanBullets {
+	if len(bullets) != 2 {
 		t.Fatalf("unexpected bullet count: %d", len(bullets))
 	}
 }
@@ -130,5 +130,16 @@ func TestWriteExecutionPlanFile(t *testing.T) {
 	}
 	if !strings.Contains(text, "1. Read config file") {
 		t.Fatalf("missing bullets: %s", text)
+	}
+}
+
+func TestParseExecutionPlanBullets_Numbered(t *testing.T) {
+	raw := "1. Read requirements\n2. Inspect target files\n3. Apply patch\n4. Run tests\n"
+	got := parseExecutionPlanBullets(raw)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 bullets, got %d (%v)", len(got), got)
+	}
+	if got[0] != "Read requirements" {
+		t.Fatalf("unexpected first bullet: %q", got[0])
 	}
 }
