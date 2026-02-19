@@ -288,9 +288,17 @@ func (m *Manager) recordProbeResult(success bool, err error) ProbeOutcome {
 		m.fs.NextProbeAt = now.Add(interval)
 		prompt := ""
 		if m.fs.ConsecutiveProbeSuccesses >= threshold {
-			m.fs.Mode = modeAwaitingUserSwitchbk
 			if m.cfg.Agents.Failover.SwitchbackRequiresApproval {
+				m.fs.Mode = modeAwaitingUserSwitchbk
 				prompt = m.buildSwitchbackPromptLocked(now)
+			} else {
+				m.fs.Mode = modeNormal
+				m.fs.ActiveModel = m.primary
+				m.fs.FallbackIndex = -1
+				m.fs.LastSwitchReason = "auto_switchback_probe_healthy"
+				m.fs.LastSwitchbackPromptAt = time.Time{}
+				m.fs.LastSwitchbackProbe = ""
+				m.fs.SwitchEpoch++
 			}
 		}
 		m.persistLocked()

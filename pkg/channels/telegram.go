@@ -319,7 +319,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 		senderID = fmt.Sprintf("%s|%s", userID, user.Username)
 	}
 
-	// 检查白名单，避免为被拒绝的用户下载附件
+	// Check allowlist to avoid downloading attachments for denied users
 	if !c.IsAllowed(userID) && !c.IsAllowed(senderID) {
 		logger.DebugCF("telegram", "Message rejected by allowlist", map[string]interface{}{
 			"user_id":  userID,
@@ -335,9 +335,9 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, update telego.Updat
 	mediaPaths := []string{}
 	attachmentIDs := []string{}
 	attachmentMarkers := []string{}
-	localFiles := []string{} // 跟踪需要清理的本地文件
+	localFiles := []string{} // Track local files that need cleanup
 
-	// 确保临时文件在函数返回时被清理
+	// Ensure temp files are cleaned up on return
 	defer func() {
 		for _, file := range localFiles {
 			if err := os.Remove(file); err != nil {

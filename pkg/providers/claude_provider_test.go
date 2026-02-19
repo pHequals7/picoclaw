@@ -302,7 +302,7 @@ func TestClaudeProvider_ChatReturnsRateLimitErrorOn429(t *testing.T) {
 	}
 }
 
-func TestClaudeProvider_ChatReturnsRateLimitErrorOn400(t *testing.T) {
+func TestClaudeProvider_ChatReturnsNormalErrorOnInvalid400(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -311,6 +311,32 @@ func TestClaudeProvider_ChatReturnsRateLimitErrorOn400(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"messages.10.content.1.tool_use.id: String should match pattern '^[a-zA-Z0-9_-]+$'"},"request_id":"req_test"}`))
+	}))
+	defer server.Close()
+
+	provider := NewClaudeProvider("test-token")
+	provider.client = createAnthropicTestClient(server.URL, "test-token")
+
+	_, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "claude-sonnet-4-5-20250929", map[string]interface{}{"max_tokens": 1024})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want non-nil")
+	}
+
+	var rlErr *RateLimitError
+	if errors.As(err, &rlErr) {
+		t.Fatalf("Chat() error = %T, should not map invalid 400 to *RateLimitError", err)
+	}
+}
+
+func TestClaudeProvider_ChatReturnsRateLimitErrorOnRetryable400(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Please retry_after 30 seconds"},"request_id":"req_test"}`))
 	}))
 	defer server.Close()
 

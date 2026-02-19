@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 )
 
@@ -181,5 +182,40 @@ func TestConfig_Complete(t *testing.T) {
 	}
 	if cfg.Agents.Failover.HoldMinutes == 0 {
 		t.Error("Failover hold window should have default value")
+	}
+}
+
+func TestApplyProviderEnvOverrides(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("PICOCLAW_PROVIDERS_OPENAI_API_KEY", "openai-env-key")
+	t.Setenv("PICOCLAW_PROVIDERS_GEMINI_API_KEY", "gemini-env-key")
+
+	applyProviderEnvOverrides(cfg)
+
+	if cfg.Providers.OpenAI.APIKey != "openai-env-key" {
+		t.Fatalf("OpenAI API key not overridden from env")
+	}
+	if cfg.Providers.Gemini.APIKey != "gemini-env-key" {
+		t.Fatalf("Gemini API key not overridden from env")
+	}
+}
+
+func TestResolveProviderEnvRefs(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("PICOCLAW_PROVIDERS_OPENROUTER_API_KEY", "openrouter-env-key")
+	cfg.Providers.OpenRouter.APIKey = "${PICOCLAW_PROVIDERS_OPENROUTER_API_KEY}"
+
+	resolveProviderEnvRefs(cfg)
+
+	if cfg.Providers.OpenRouter.APIKey != "openrouter-env-key" {
+		t.Fatalf("expected env ref to resolve, got %q", cfg.Providers.OpenRouter.APIKey)
+	}
+}
+
+func TestResolveEnvRefKeepsOriginalWhenUnset(t *testing.T) {
+	_ = os.Unsetenv("PICOCLAW_PROVIDERS_DEEPSEEK_API_KEY")
+	raw := "${PICOCLAW_PROVIDERS_DEEPSEEK_API_KEY}"
+	if got := resolveEnvRef(raw); got != raw {
+		t.Fatalf("expected unresolved ref to stay unchanged, got %q", got)
 	}
 }

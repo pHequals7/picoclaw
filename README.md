@@ -3,7 +3,7 @@
 
   <h1>PicoClaw: Ultra-Efficient AI Assistant in Go</h1>
 
-  <h3>$10 Hardware · 10MB RAM · 1s Boot · 皮皮虾，我们走！</h3>
+  <h3>$10 Hardware · 10MB RAM · 1s Boot</h3>
 
   <p>
     <img src="https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go&logoColor=white" alt="Go">
@@ -14,7 +14,7 @@
     <a href="https://x.com/SipeedIO"><img src="https://img.shields.io/badge/X_(Twitter)-SipeedIO-black?style=flat&logo=x&logoColor=white" alt="Twitter"></a>
   </p>
 
- [中文](README.zh.md) | [日本語](README.ja.md) | **English**
+ **English**
 </div>
 
 ---
@@ -39,7 +39,7 @@
 </table>
 
 > [!CAUTION]
-> **🚨 SECURITY & OFFICIAL CHANNELS / 安全声明**
+> **🚨 SECURITY & OFFICIAL CHANNELS**
 >
 > * **NO CRYPTO:** PicoClaw has **NO** official token/coin. All claims on `pump.fun` or other trading platforms are **SCAMS**.
 > * **OFFICIAL DOMAIN:** The **ONLY** official website is **[picoclaw.io](https://picoclaw.io)**, and company website is **[sipeed.com](https://sipeed.com)**
@@ -51,7 +51,7 @@
 2026-02-13 🎉 PicoClaw hit 5000 stars in 4days! Thank you for the community! There are so many PRs&issues come in (during Chinese New Year holidays), we are finalizing the Project Roadmap and setting up the Developer Group to accelerate PicoClaw's development.  
 🚀 Call to Action: Please submit your feature requests in GitHub Discussions. We will review and prioritize them during our upcoming weekly meeting.
 
-2026-02-09 🎉 PicoClaw Launched! Built in 1 day to bring AI Agents to $10 hardware with <10MB RAM. 🦐 PicoClaw，Let's Go！
+2026-02-09 🎉 PicoClaw Launched! Built in 1 day to bring AI Agents to $10 hardware with <10MB RAM. 🦐 PicoClaw, Let's Go!
 
 ## ✨ Features
 
@@ -182,7 +182,7 @@ docker compose --profile gateway up -d
 
 > [!TIP]
 > Set your API key in `~/.picoclaw/config.json`.
-> Get API keys: [OpenRouter](https://openrouter.ai/keys) (LLM) · [Zhipu](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) (LLM)
+> Get API keys: [OpenRouter](https://openrouter.ai/keys) (LLM) (LLM)
 > Web search is **optional** - get free [Brave Search API](https://brave.com/search/api) (2000 free queries/month) or use built-in auto fallback.
 
 **1. Initialize**
@@ -228,7 +228,7 @@ picoclaw onboard
 
 **3. Get API Keys**
 
-* **LLM Provider**: [OpenRouter](https://openrouter.ai/keys) · [Zhipu](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) · [Anthropic](https://console.anthropic.com) · [OpenAI](https://platform.openai.com) · [Gemini](https://aistudio.google.com/api-keys)
+* **LLM Provider**: [OpenRouter](https://openrouter.ai/keys) · [Anthropic](https://console.anthropic.com) · [OpenAI](https://platform.openai.com) · [Gemini](https://aistudio.google.com/api-keys)
 * **Web Search** (optional): [Brave Search](https://brave.com/search/api) - Free tier available (2000 requests/month)
 
 > **Note**: See `config.example.json` for a complete configuration template.
@@ -245,7 +245,7 @@ That's it! You have a working AI assistant in 2 minutes.
 
 ## 💬 Chat Apps
 
-Talk to your picoclaw through Telegram, Discord, DingTalk, or LINE.
+Talk to your picoclaw through Telegram or Discord.
 
 > **Vision support**: Send photos in any channel and PicoClaw will describe, analyze, or answer questions about them. Supported formats: JPEG, PNG, GIF, WebP. Works with Claude and OpenAI-compatible vision models.
 
@@ -255,9 +255,6 @@ Talk to your picoclaw through Telegram, Discord, DingTalk, or LINE.
 | ------------ | ---------------------------------- |
 | **Telegram** | Easy (just a token)                |
 | **Discord**  | Easy (bot token + intents)         |
-| **QQ**       | Easy (AppID + AppSecret)           |
-| **DingTalk** | Medium (app credentials)           |
-| **LINE**     | Medium (credentials + webhook URL) |
 
 <details>
 <summary><b>Telegram</b> (Recommended)</summary>
@@ -340,122 +337,8 @@ picoclaw gateway
 
 </details>
 
-<details>
-<summary><b>QQ</b></summary>
 
-**1. Create a bot**
 
-- Go to [QQ Open Platform](https://q.qq.com/#)
-- Create an application → Get **AppID** and **AppSecret**
-
-**2. Configure**
-
-```json
-{
-  "channels": {
-    "qq": {
-      "enabled": true,
-      "app_id": "YOUR_APP_ID",
-      "app_secret": "YOUR_APP_SECRET",
-      "allow_from": []
-    }
-  }
-}
-```
-
-> Set `allow_from` to empty to allow all users, or specify QQ numbers to restrict access.
-
-**3. Run**
-
-```bash
-picoclaw gateway
-```
-
-</details>
-
-<details>
-<summary><b>DingTalk</b></summary>
-
-**1. Create a bot**
-
-* Go to [Open Platform](https://open.dingtalk.com/)
-* Create an internal app
-* Copy Client ID and Client Secret
-
-**2. Configure**
-
-```json
-{
-  "channels": {
-    "dingtalk": {
-      "enabled": true,
-      "client_id": "YOUR_CLIENT_ID",
-      "client_secret": "YOUR_CLIENT_SECRET",
-      "allow_from": []
-    }
-  }
-}
-```
-
-> Set `allow_from` to empty to allow all users, or specify QQ numbers to restrict access.
-
-**3. Run**
-
-```bash
-picoclaw gateway
-```
-
-</details>
-
-<details>
-<summary><b>LINE</b></summary>
-
-**1. Create a LINE Official Account**
-
-- Go to [LINE Developers Console](https://developers.line.biz/)
-- Create a provider → Create a Messaging API channel
-- Copy **Channel Secret** and **Channel Access Token**
-
-**2. Configure**
-
-```json
-{
-  "channels": {
-    "line": {
-      "enabled": true,
-      "channel_secret": "YOUR_CHANNEL_SECRET",
-      "channel_access_token": "YOUR_CHANNEL_ACCESS_TOKEN",
-      "webhook_host": "0.0.0.0",
-      "webhook_port": 18791,
-      "webhook_path": "/webhook/line",
-      "allow_from": []
-    }
-  }
-}
-```
-
-**3. Set up Webhook URL**
-
-LINE requires HTTPS for webhooks. Use a reverse proxy or tunnel:
-
-```bash
-# Example with ngrok
-ngrok http 18791
-```
-
-Then set the Webhook URL in LINE Developers Console to `https://your-domain/webhook/line` and enable **Use webhook**.
-
-**4. Run**
-
-```bash
-picoclaw gateway
-```
-
-> In group chats, the bot responds only when @mentioned. Replies quote the original message.
-
-> **Docker Compose**: Add `ports: ["18791:18791"]` to the `picoclaw-gateway` service to expose the webhook port.
-
-</details>
 
 ## <img src="assets/clawdchat-icon.png" width="24" height="24" alt="ClawdChat"> Join the Agent Social Network
 
@@ -710,49 +593,12 @@ PicoClaw can show real-time progress updates in chat while processing requests (
 | `anthropic`                | LLM (Claude direct, **vision supported**)  | [console.anthropic.com](https://console.anthropic.com) |
 | `openai`                   | LLM (GPT direct, **vision supported**)     | [platform.openai.com](https://platform.openai.com)     |
 | `gemini`                   | LLM (Gemini direct)                        | [aistudio.google.com](https://aistudio.google.com)     |
-| `zhipu`                    | LLM (Zhipu direct)                         | [bigmodel.cn](bigmodel.cn)                             |
 | `openrouter`               | LLM (access to all models)                 | [openrouter.ai](https://openrouter.ai)                 |
 | `deepseek`                 | LLM (DeepSeek direct)                      | [platform.deepseek.com](https://platform.deepseek.com) |
 | `groq`                     | LLM + **Voice transcription** (Whisper)    | [console.groq.com](https://console.groq.com)           |
 
 > **Claude Max / Setup Token**: If you have a Claude Max subscription, you can authenticate using `picoclaw auth login --provider anthropic` with a setup token (`sk-ant-oat01-*`). No API key needed.
 
-<details>
-<summary><b>Zhipu</b></summary>
-
-**1. Get API key and base URL**
-
-* Get [API key](https://bigmodel.cn/usercenter/proj-mgmt/apikeys)
-
-**2. Configure**
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "workspace": "~/.picoclaw/workspace",
-      "model": "glm-4.7",
-      "max_tokens": 8192,
-      "temperature": 0.7,
-      "max_tool_iterations": 20
-    }
-  },
-  "providers": {
-    "zhipu": {
-      "api_key": "Your API Key",
-      "api_base": "https://open.bigmodel.cn/api/paas/v4"
-    }
-  }
-}
-```
-
-**3. Run**
-
-```bash
-picoclaw agent -m "Hello"
-```
-
-</details>
 
 <details>
 <summary><b>Full config example</b></summary>
@@ -785,20 +631,6 @@ picoclaw agent -m "Hello"
     },
     "whatsapp": {
       "enabled": false
-    },
-    "feishu": {
-      "enabled": false,
-      "app_id": "cli_xxx",
-      "app_secret": "xxx",
-      "encrypt_key": "",
-      "verification_token": "",
-      "allow_from": []
-    },
-    "qq": {
-      "enabled": false,
-      "app_id": "",
-      "app_secret": "",
-      "allow_from": []
     }
   },
   "tools": {
@@ -863,11 +695,9 @@ User Groups:
 
 discord:  <https://discord.gg/V4sAZ9XWpN>
 
-<img src="assets/wechat.png" alt="PicoClaw" width="512">
-
 ## 🐛 Troubleshooting
 
-### Web search says "API 配置问题"
+### Web search says "API configuration issue"
 
 This is normal if you haven't configured a search API key yet. PicoClaw will provide helpful links for manual searching.
 
@@ -898,7 +728,7 @@ Add the key to `~/.picoclaw/config.json` if using Brave:
 
 ### Getting content filtering errors
 
-Some providers (like Zhipu) have content filtering. Try rephrasing your query or use a different model.
+Some providers have content filtering. Try rephrasing your query or use a different model.
 
 ### Telegram bot says "Conflict: terminated by other getUpdates"
 
@@ -911,6 +741,5 @@ This happens when another instance of the bot is running. Make sure only one `pi
 | Service          | Free Tier           | Use Case                              |
 | ---------------- | ------------------- | ------------------------------------- |
 | **OpenRouter**   | 200K tokens/month   | Multiple models (Claude, GPT-4, etc.) |
-| **Zhipu**        | 200K tokens/month   | Best for Chinese users                |
 | **Brave Search** | 2000 queries/month  | Web search functionality              |
 | **Groq**         | Free tier available | Fast inference (Llama, Mixtral)       |

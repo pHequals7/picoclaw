@@ -72,10 +72,12 @@ func (p *ClaudeProvider) Chat(ctx context.Context, messages []Message, tools []T
 	resp, err := p.client.Messages.New(ctx, params, opts...)
 	if err != nil {
 		var apiErr *anthropic.Error
-		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode == http.StatusBadRequest) {
-			return nil, &RateLimitError{
-				StatusCode: apiErr.StatusCode,
-				Body:       apiErr.Error(),
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusTooManyRequests || (apiErr.StatusCode == http.StatusBadRequest && isRetryableAnthropicBadRequest(apiErr.Error())) {
+				return nil, &RateLimitError{
+					StatusCode: apiErr.StatusCode,
+					Body:       apiErr.Error(),
+				}
 			}
 		}
 		return nil, fmt.Errorf("claude API call: %w", err)
@@ -275,6 +277,20 @@ func parseClaudeResponse(resp *anthropic.Message) *LLMResponse {
 			CompletionTokens: int(resp.Usage.OutputTokens),
 			TotalTokens:      int(resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.OutputTokens),
 		},
+	}
+}
+
+func isRetryableAnthropicBadRequest(body string) bool {
+	lower := strings.ToLower(body)
+	switch {
+	case strings.Contains(lower, "rate_limit_error"):
+		return true
+	case strings.Contains(lower, "overloaded_error"):
+		return true
+	case strings.Contains(lower, "retry_after"):
+		return true
+	default:
+		return false
 	}
 }
 

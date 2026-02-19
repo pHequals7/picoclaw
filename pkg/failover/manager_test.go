@@ -85,3 +85,21 @@ func TestHandleUserDecisionSwitchesBack(t *testing.T) {
 		t.Fatalf("expected to return to primary")
 	}
 }
+
+func TestProbeAutoSwitchbackWithoutApproval(t *testing.T) {
+	m := newTestManager(t)
+	m.cfg.Agents.Failover.SwitchbackRequiresApproval = false
+	_ = m.OnLLMRateLimited(m.PrimaryModel(), nil)
+
+	_ = m.recordProbeResult(true, nil)
+	outcome := m.recordProbeResult(true, nil)
+	if !outcome.BecameHealthy {
+		t.Fatalf("expected probe threshold to mark healthy")
+	}
+	if !m.IsUsingPrimary() {
+		t.Fatalf("expected automatic switchback to primary")
+	}
+	if snap := m.Snapshot(); snap.Mode != modeNormal {
+		t.Fatalf("expected normal mode after auto switchback, got %s", snap.Mode)
+	}
+}

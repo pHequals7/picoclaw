@@ -11,7 +11,7 @@ Ultra-lightweight personal AI assistant written in Go, inspired by nanobot.
 
 ## Purpose
 - Provide intelligent AI assistance with minimal resource usage
-- Support multiple LLM providers (OpenAI, Anthropic, Zhipu, etc.)
+- Support multiple LLM providers (OpenAI, Anthropic, Gemini, etc.)
 - Enable easy customization through skills system
 - Run on minimal hardware ($10 boards, <10MB RAM)
 
@@ -20,7 +20,7 @@ Ultra-lightweight personal AI assistant written in Go, inspired by nanobot.
 - Web search and content fetching
 - File system operations (read, write, edit)
 - Shell command execution
-- Multi-channel messaging (Telegram, WhatsApp, Feishu)
+- Multi-channel messaging (Telegram, WhatsApp, Discord)
 - Skill-based extensibility
 - Memory and context management
 
