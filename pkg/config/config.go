@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/caarlos0/env/v11"
@@ -284,7 +285,7 @@ func DefaultConfig() *Config {
 			Failover: AgentFailover{
 				Enabled:                      true,
 				HoldMinutes:                  300,
-				ProbeIntervalMinutes:         5,
+				ProbeIntervalMinutes:         60,
 				ProbeSuccessThreshold:        2,
 				ProbeFailureBackoffMinutes:   10,
 				NotifyOnSwitch:               true,
@@ -435,8 +436,92 @@ func LoadConfig(path string) (*Config, error) {
 	if err := env.Parse(cfg); err != nil {
 		return nil, err
 	}
+	applyProviderEnvOverrides(cfg)
+	resolveProviderEnvRefs(cfg)
 
 	return cfg, nil
+}
+
+func applyProviderEnvOverrides(cfg *Config) {
+	type providerEnvBinding struct {
+		target *ProviderConfig
+		apiKey string
+	}
+	bindings := []providerEnvBinding{
+		{target: &cfg.Providers.Anthropic, apiKey: "PICOCLAW_PROVIDERS_ANTHROPIC_API_KEY"},
+		{target: &cfg.Providers.OpenAI, apiKey: "PICOCLAW_PROVIDERS_OPENAI_API_KEY"},
+		{target: &cfg.Providers.OpenRouter, apiKey: "PICOCLAW_PROVIDERS_OPENROUTER_API_KEY"},
+		{target: &cfg.Providers.Groq, apiKey: "PICOCLAW_PROVIDERS_GROQ_API_KEY"},
+		{target: &cfg.Providers.Zhipu, apiKey: "PICOCLAW_PROVIDERS_ZHIPU_API_KEY"},
+		{target: &cfg.Providers.VLLM, apiKey: "PICOCLAW_PROVIDERS_VLLM_API_KEY"},
+		{target: &cfg.Providers.Gemini, apiKey: "PICOCLAW_PROVIDERS_GEMINI_API_KEY"},
+		{target: &cfg.Providers.Nvidia, apiKey: "PICOCLAW_PROVIDERS_NVIDIA_API_KEY"},
+		{target: &cfg.Providers.Moonshot, apiKey: "PICOCLAW_PROVIDERS_MOONSHOT_API_KEY"},
+		{target: &cfg.Providers.ShengSuanYun, apiKey: "PICOCLAW_PROVIDERS_SHENGSUANYUN_API_KEY"},
+		{target: &cfg.Providers.DeepSeek, apiKey: "PICOCLAW_PROVIDERS_DEEPSEEK_API_KEY"},
+		{target: &cfg.Providers.GitHubCopilot, apiKey: "PICOCLAW_PROVIDERS_GITHUB_COPILOT_API_KEY"},
+	}
+
+	for _, b := range bindings {
+		if b.target == nil {
+			continue
+		}
+		if v := strings.TrimSpace(os.Getenv(b.apiKey)); v != "" {
+			b.target.APIKey = v
+		}
+	}
+}
+
+func resolveProviderEnvRefs(cfg *Config) {
+	providers := []*ProviderConfig{
+		&cfg.Providers.Anthropic,
+		&cfg.Providers.OpenAI,
+		&cfg.Providers.OpenRouter,
+		&cfg.Providers.Groq,
+		&cfg.Providers.Zhipu,
+		&cfg.Providers.VLLM,
+		&cfg.Providers.Gemini,
+		&cfg.Providers.Nvidia,
+		&cfg.Providers.Moonshot,
+		&cfg.Providers.ShengSuanYun,
+		&cfg.Providers.DeepSeek,
+		&cfg.Providers.GitHubCopilot,
+	}
+	for _, p := range providers {
+		if p == nil {
+			continue
+		}
+		p.APIKey = resolveEnvRef(p.APIKey)
+		p.APIBase = resolveEnvRef(p.APIBase)
+		p.Proxy = resolveEnvRef(p.Proxy)
+	}
+}
+
+func resolveEnvRef(v string) string {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return v
+	}
+	if strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}") {
+		key := strings.TrimSpace(s[2 : len(s)-1])
+		if key == "" {
+			return v
+		}
+		if val, ok := os.LookupEnv(key); ok {
+			return val
+		}
+		return v
+	}
+	if strings.HasPrefix(s, "$") && len(s) > 1 {
+		key := strings.TrimSpace(s[1:])
+		if key == "" {
+			return v
+		}
+		if val, ok := os.LookupEnv(key); ok {
+			return val
+		}
+	}
+	return v
 }
 
 func SaveConfig(path string, cfg *Config) error {

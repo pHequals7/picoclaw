@@ -24,6 +24,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
+	"github.com/sipeed/picoclaw/pkg/failover"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -42,6 +43,7 @@ type AgentLoop struct {
 	maxIterations  int
 	sessions       *session.SessionManager
 	state          *state.Manager
+	failoverMgr    *failover.Manager
 	contextBuilder *ContextBuilder
 	tools          *tools.ToolRegistry
 	usageStore     *usage.Store
@@ -49,6 +51,9 @@ type AgentLoop struct {
 	running        atomic.Bool
 	summarizing    sync.Map // Tracks which sessions are currently being summarized
 	activeCancel   sync.Map // sessionKey -> context.CancelFunc for in-flight requests
+	probeRunning   atomic.Bool
+	noticeMu       sync.Mutex
+	lastNoticeByEP int64
 }
 
 // processOptions configures how a message is processed
@@ -175,6 +180,9 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 
 	// Create state manager for atomic state persistence
 	stateManager := state.NewManager(workspace)
+	failoverManager := failover.NewManager(cfg, stateManager)
+	// Reuse the primary provider instance for the primary model route.
+	failoverManager.SetProviderForModel(cfg.Agents.Defaults.Model, provider)
 
 	// Create context builder and set tools registry
 	contextBuilder := NewContextBuilder(workspace)
@@ -189,6 +197,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		maxIterations:  cfg.Agents.Defaults.MaxToolIterations,
 		sessions:       sessionsManager,
 		state:          stateManager,
+		failoverMgr:    failoverManager,
 		contextBuilder: contextBuilder,
 		tools:          toolsRegistry,
 		usageStore:     usage.NewStore(filepath.Join(workspace, "usage")),
@@ -350,6 +359,15 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	trimmed := strings.TrimSpace(msg.Content)
 	if strings.HasPrefix(trimmed, "/usage") {
 		return al.handleUsageCommand(msg, trimmed), nil
+	}
+	if al.failoverMgr != nil && al.failoverMgr.Enabled() {
+		if decision := al.failoverMgr.HandleUserSwitchbackDecision(trimmed); decision.Handled {
+			if decision.Reply != "" {
+				return decision.Reply, nil
+			}
+			return "Acknowledged.", nil
+		}
+		al.maybeRunFailoverProbe(msg.Channel, msg.ChatID)
 	}
 
 	// Create ActionStream for visibility if enabled
@@ -761,12 +779,24 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 
 		// Build tool definitions
 		providerToolDefs := al.tools.ToProviderDefs()
+		activeProvider := al.provider
+		activeModel := al.model
+		switchEpoch := int64(0)
+		if al.failoverMgr != nil && al.failoverMgr.Enabled() {
+			route, routeErr := al.failoverMgr.ResolveRoute()
+			if routeErr != nil {
+				return "", iteration, fmt.Errorf("resolve failover route: %w", routeErr)
+			}
+			activeProvider = route.Provider
+			activeModel = route.Model
+			switchEpoch = route.SwitchEpoch
+		}
 
 		// Log LLM request details
 		logger.DebugCF("agent", "LLM request",
 			map[string]interface{}{
 				"iteration":         iteration,
-				"model":             al.model,
+				"model":             activeModel,
 				"messages_count":    len(messages),
 				"tools_count":       len(providerToolDefs),
 				"max_tokens":        8192,
@@ -782,19 +812,59 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				"tools_json":    formatToolsForLog(providerToolDefs),
 			})
 
-		// Call LLM
-		response, err := al.provider.Chat(ctx, messages, providerToolDefs, al.model, map[string]interface{}{
+		// Call LLM using routed model/provider
+		response, err := activeProvider.Chat(ctx, messages, providerToolDefs, activeModel, map[string]interface{}{
 			"max_tokens":  8192,
 			"temperature": 0.7,
 		})
 
 		if err != nil {
-			logger.ErrorCF("agent", "LLM call failed",
-				map[string]interface{}{
-					"iteration": iteration,
-					"error":     err.Error(),
-				})
-			return "", iteration, fmt.Errorf("LLM call failed: %w", err)
+			var rateLimitErr *providers.RateLimitError
+			if al.failoverMgr != nil && al.failoverMgr.Enabled() && errors.As(err, &rateLimitErr) {
+				switchEvent := al.failoverMgr.OnLLMRateLimited(activeModel, err)
+				logger.WarnCF("agent", "Failover switch evaluation",
+					map[string]interface{}{
+						"iteration":      iteration,
+						"from_model":     switchEvent.FromModel,
+						"to_model":       switchEvent.ToModel,
+						"reason":         switchEvent.Reason,
+						"switched":       switchEvent.Switched,
+						"status_code":    rateLimitErr.StatusCode,
+						"switch_epoch":   switchEpoch,
+						"correlation_id": opts.CorrelationID,
+					})
+
+				if switchEvent.Switched {
+					al.notifyFailoverSwitch(opts.Channel, opts.ChatID, switchEvent)
+					retryRoute, routeErr := al.failoverMgr.ResolveRoute()
+					if routeErr != nil {
+						return "", iteration, fmt.Errorf("resolve failover retry route: %w", routeErr)
+					}
+					activeProvider = retryRoute.Provider
+					activeModel = retryRoute.Model
+					switchEpoch = retryRoute.SwitchEpoch
+
+					response, err = activeProvider.Chat(ctx, messages, providerToolDefs, activeModel, map[string]interface{}{
+						"max_tokens":  8192,
+						"temperature": 0.7,
+					})
+				}
+			}
+
+			if err != nil {
+				logger.ErrorCF("agent", "LLM call failed",
+					map[string]interface{}{
+						"iteration":      iteration,
+						"error":          err.Error(),
+						"model":          activeModel,
+						"switch_epoch":   switchEpoch,
+						"correlation_id": opts.CorrelationID,
+					})
+				return "", iteration, fmt.Errorf("LLM call failed: %w", err)
+			}
+		}
+		if al.failoverMgr != nil && al.failoverMgr.Enabled() {
+			al.failoverMgr.OnLLMSuccess(activeModel)
 		}
 
 		if al.usageStore != nil {
@@ -818,8 +888,8 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				Timestamp:        time.Now().UTC(),
 				SessionKey:       opts.SessionKey,
 				DayKey:           time.Now().UTC().Format("2006-01-02"),
-				Provider:         providerFromModel(al.model),
-				Model:            al.model,
+				Provider:         providerFromModel(activeModel),
+				Model:            activeModel,
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
 				TotalTokens:      totalTokens,
@@ -853,13 +923,35 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			})
 
 		// Plan+execute mode: first tool-call batch becomes explicit user-visible plan.
-		// Persist plan into model context so execution remains aligned with announced intent.
+		// Persist the plan as a workspace artifact and publish it to chat.
 		if !planState.Announced {
 			planState.Bullets = buildExecutionPlanBullets(response.ToolCalls)
 			planState.absorbToolCalls(response.ToolCalls)
 			planState.Announced = true
 
-			planMsg := formatExecutionPlanProgress(planState.Bullets)
+			planPath, planErr := writeExecutionPlanFile(al.workspace, planState.Bullets, planFileMetadata{
+				SessionKey:    opts.SessionKey,
+				CorrelationID: opts.CorrelationID,
+				Model:         activeModel,
+			}, time.Now())
+			if planErr != nil {
+				logger.WarnCF("agent", "Failed to persist execution plan file",
+					map[string]interface{}{
+						"error":          planErr.Error(),
+						"session_key":    opts.SessionKey,
+						"correlation_id": opts.CorrelationID,
+					})
+			} else {
+				logger.InfoCF("agent", "Execution plan file created",
+					map[string]interface{}{
+						"path":           planPath,
+						"bullets":        len(planState.Bullets),
+						"session_key":    opts.SessionKey,
+						"correlation_id": opts.CorrelationID,
+					})
+			}
+
+			planMsg := formatExecutionPlanProgressWithArtifact(planState.Bullets, planPath)
 			if opts.Channel != "" && opts.ChatID != "" {
 				// Send the plan as a regular message so it remains persistent in chat.
 				// Telegram channel logic will finalize the current placeholder for this message.
@@ -877,13 +969,6 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 					IsProgressUpdate: true,
 				})
 			}
-
-			planContext := providers.Message{
-				Role:    "assistant",
-				Content: formatPlanContextMessage(planState.Bullets),
-			}
-			messages = append(messages, planContext)
-			al.sessions.AddFullMessage(opts.SessionKey, planContext)
 		}
 
 		// Build assistant message with tool calls
@@ -931,12 +1016,6 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 					})
 				}
 
-				updateContext := providers.Message{
-					Role:    "assistant",
-					Content: "Plan update: " + updateStep,
-				}
-				messages = append(messages, updateContext)
-				al.sessions.AddFullMessage(opts.SessionKey, updateContext)
 			}
 
 			// Log tool call with arguments preview
@@ -1020,6 +1099,76 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 	}
 
 	return finalContent, iteration, nil
+}
+
+func (al *AgentLoop) maybeRunFailoverProbe(channel, chatID string) {
+	if al.failoverMgr == nil || !al.failoverMgr.Enabled() {
+		return
+	}
+	if !al.failoverMgr.ShouldProbe(time.Now()) {
+		return
+	}
+	if !al.probeRunning.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func() {
+		defer al.probeRunning.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		outcome := al.failoverMgr.RunProbe(ctx)
+		logger.InfoCF("agent", "Failover probe completed",
+			map[string]interface{}{
+				"success":        outcome.Success,
+				"became_healthy": outcome.BecameHealthy,
+				"next_probe_at":  outcome.NextProbeAt.UTC().Format(time.RFC3339),
+			})
+
+		if channel == "" || chatID == "" {
+			return
+		}
+		prompt := strings.TrimSpace(outcome.PromptText)
+		if prompt == "" {
+			if p, ok := al.failoverMgr.ShouldSendSwitchbackPrompt(time.Now()); ok {
+				prompt = p
+			}
+		}
+		if prompt != "" {
+			al.bus.PublishOutbound(bus.OutboundMessage{
+				Channel: channel,
+				ChatID:  chatID,
+				Content: prompt,
+			})
+		}
+	}()
+}
+
+func (al *AgentLoop) notifyFailoverSwitch(channel, chatID string, event failover.SwitchEvent) {
+	if channel == "" || chatID == "" || !al.config.Agents.Failover.NotifyOnSwitch {
+		return
+	}
+
+	epoch := int64(0)
+	if al.failoverMgr != nil {
+		epoch = al.failoverMgr.Snapshot().SwitchEpoch
+	}
+
+	al.noticeMu.Lock()
+	if epoch > 0 && epoch <= al.lastNoticeByEP {
+		al.noticeMu.Unlock()
+		return
+	}
+	if epoch > 0 {
+		al.lastNoticeByEP = epoch
+	}
+	al.noticeMu.Unlock()
+
+	al.bus.PublishOutbound(bus.OutboundMessage{
+		Channel: channel,
+		ChatID:  chatID,
+		Content: fmt.Sprintf("Failover active: switched from %s to %s due to provider rate limits.", event.FromModel, event.ToModel),
+	})
 }
 
 func providerFromModel(model string) string {

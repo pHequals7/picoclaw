@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -54,6 +57,19 @@ func TestFormatExecutionPlanProgress(t *testing.T) {
 	}
 }
 
+func TestFormatExecutionPlanProgressWithArtifact(t *testing.T) {
+	msg := formatExecutionPlanProgressWithArtifact([]string{
+		"Read config file",
+		"Run validation commands",
+		"Write patch",
+		"Summarize results",
+	}, "/home/ubuntu/.picoclaw/workspace/plans/2026-02-18_150000_read-config-file.md")
+
+	if !strings.Contains(msg, "Plan file:") {
+		t.Fatalf("missing plan file line: %q", msg)
+	}
+}
+
 func TestSummarizeToolCallForPlan_Exec(t *testing.T) {
 	tc := providers.ToolCall{
 		Name:      "exec",
@@ -77,5 +93,42 @@ func TestExecutionPlanState_AbsorbAndAllow(t *testing.T) {
 	}
 	if state.isAllowedTool("write_file") {
 		t.Fatalf("unexpected allowed tool")
+	}
+}
+
+func TestWriteExecutionPlanFile(t *testing.T) {
+	tmp := t.TempDir()
+	now := time.Date(2026, 2, 18, 15, 4, 5, 0, time.UTC)
+
+	path, err := writeExecutionPlanFile(tmp, []string{
+		"Read config file",
+		"Run validation commands",
+		"Write patch",
+		"Summarize results",
+	}, planFileMetadata{
+		SessionKey:    "telegram:8138716728",
+		CorrelationID: "8138716728-8138716728-1771426293940",
+		Model:         "claude-sonnet-4-6",
+	}, now)
+	if err != nil {
+		t.Fatalf("writeExecutionPlanFile() error: %v", err)
+	}
+
+	if !strings.HasPrefix(path, filepath.Join(tmp, "plans")+string(os.PathSeparator)) {
+		t.Fatalf("unexpected plan path: %s", path)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read plan file: %v", err)
+	}
+	text := string(content)
+	if !strings.Contains(text, `session_key: "telegram:8138716728"`) {
+		t.Fatalf("missing session metadata: %s", text)
+	}
+	if !strings.Contains(text, "# Execution Plan") {
+		t.Fatalf("missing title: %s", text)
+	}
+	if !strings.Contains(text, "1. Read config file") {
+		t.Fatalf("missing bullets: %s", text)
 	}
 }

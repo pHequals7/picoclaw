@@ -5,7 +5,10 @@
       "restrict_to_workspace": true,
       "model": "glm-4.7",
       "fallback_model": "gpt-5-mini",
-      "fallback_models": ["gpt-5-mini", "gemini-2.5-flash"],
+      "fallback_models": [
+        "gpt-5-mini",
+        "gemini-2.5-flash"
+      ],
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20
@@ -13,7 +16,7 @@
     "failover": {
       "enabled": true,
       "hold_minutes": 300,
-      "probe_interval_minutes": 5,
+      "probe_interval_minutes": 60,
       "probe_success_threshold": 2,
       "probe_failure_backoff_minutes": 10,
       "notify_on_switch": true,
@@ -28,7 +31,9 @@
       "enabled": false,
       "token": "YOUR_TELEGRAM_BOT_TOKEN",
       "proxy": "",
-      "allow_from": ["YOUR_USER_ID"]
+      "allow_from": [
+        "YOUR_USER_ID"
+      ]
     },
     "discord": {
       "enabled": false,
@@ -46,41 +51,10 @@
       "bridge_url": "ws://localhost:3001",
       "allow_from": []
     },
-    "feishu": {
-      "enabled": false,
-      "app_id": "",
-      "app_secret": "",
-      "encrypt_key": "",
-      "verification_token": "",
-      "allow_from": []
-    },
-    "dingtalk": {
-      "enabled": false,
-      "client_id": "YOUR_CLIENT_ID",
-      "client_secret": "YOUR_CLIENT_SECRET",
-      "allow_from": []
-    },
     "slack": {
       "enabled": false,
       "bot_token": "xoxb-YOUR-BOT-TOKEN",
       "app_token": "xapp-YOUR-APP-TOKEN",
-      "allow_from": []
-    },
-    "line": {
-      "enabled": false,
-      "channel_secret": "YOUR_LINE_CHANNEL_SECRET",
-      "channel_access_token": "YOUR_LINE_CHANNEL_ACCESS_TOKEN",
-      "webhook_host": "0.0.0.0",
-      "webhook_port": 18791,
-      "webhook_path": "/webhook/line",
-      "allow_from": []
-    },
-    "onebot": {
-      "enabled": false,
-      "ws_url": "ws://127.0.0.1:3001",
-      "access_token": "",
-      "reconnect_interval": 5,
-      "group_trigger_prefix": [],
       "allow_from": []
     }
   },
@@ -99,10 +73,6 @@
     },
     "groq": {
       "api_key": "gsk_xxx",
-      "api_base": ""
-    },
-    "zhipu": {
-      "api_key": "YOUR_ZHIPU_API_KEY",
       "api_base": ""
     },
     "gemini": {
@@ -138,7 +108,11 @@
           "enabled": false,
           "transport": "command",
           "command": "npx",
-          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "/tmp"
+          ],
           "tool_prefix": "mcp_fs",
           "startup_timeout_ms": 8000,
           "call_timeout_ms": 30000

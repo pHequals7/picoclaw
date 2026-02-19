@@ -197,7 +197,7 @@ func (c *SlackChannel) handleMessageEvent(ev *slackevents.MessageEvent) {
 		return
 	}
 
-	// 检查白名单，避免为被拒绝的用户下载附件
+	// Check allowlist to avoid downloading attachments for denied users
 	if !c.IsAllowed(ev.User) {
 		logger.DebugCF("slack", "Message rejected by allowlist", map[string]interface{}{
 			"user_id": ev.User,
