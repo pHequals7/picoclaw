@@ -85,6 +85,21 @@ build-android: generate
 	@GOOS=linux GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-android-arm64 ./$(CMD_DIR)
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)-android-arm64"
 
+# POCO phone deploy settings (override with env vars or make args)
+PHONE_HOST?=192.168.29.219
+PHONE_PORT?=8022
+PHONE_USER?=termux
+PHONE_BIN?=~/bin/$(BINARY_NAME)
+
+## deploy: Build for Android, scp to phone, restart gateway
+deploy: build-android
+	@echo "Deploying to $(PHONE_USER)@$(PHONE_HOST):$(PHONE_PORT)..."
+	@scp -P $(PHONE_PORT) $(BUILD_DIR)/$(BINARY_NAME)-android-arm64 $(PHONE_USER)@$(PHONE_HOST):$(PHONE_BIN)
+	@echo "Restarting gateway..."
+	@ssh -p $(PHONE_PORT) $(PHONE_USER)@$(PHONE_HOST) 'pkill -f "$(BINARY_NAME) gateway" || true'
+	@sleep 6
+	@ssh -p $(PHONE_PORT) $(PHONE_USER)@$(PHONE_HOST) 'pgrep -f "$(BINARY_NAME) gateway" > /dev/null && echo "Gateway restarted OK" || echo "WARNING: Gateway did not restart"'
+
 ## build-all: Build picoclaw for all platforms
 build-all: generate
 	@echo "Building for multiple platforms..."
