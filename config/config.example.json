@@ -100,6 +100,11 @@
         "max_results": 5
       }
     },
+    "telephony": {
+      "enabled": false,
+      "sms_allow_to": [],
+      "call_allow_to": []
+    },
     "mcp": {
       "enabled": false,
       "servers": [
