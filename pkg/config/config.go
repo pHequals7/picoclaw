@@ -73,6 +73,7 @@ type AgentDefaults struct {
 	MaxToolIterations   int      `json:"max_tool_iterations" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
 	FallbackModel       string   `json:"fallback_model" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODEL"`
 	FallbackModels      []string `json:"fallback_models" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODELS"`
+	HTTPTimeout         int      `json:"http_timeout" env:"PICOCLAW_AGENTS_DEFAULTS_HTTP_TIMEOUT"`
 }
 
 type AgentFailover struct {
