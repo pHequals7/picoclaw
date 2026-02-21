@@ -3,6 +3,9 @@ package utils
 import (
 	"encoding/base64"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"net/http"
 	"os"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"golang.org/x/image/draw"
 )
 
 // MediaImage holds a base64-encoded image with its MIME type.
@@ -79,6 +83,57 @@ func ProcessMediaImages(paths []string) []MediaImage {
 			map[string]interface{}{"path": p, "mime": mimeType, "size_bytes": len(b64) * 3 / 4})
 	}
 	return images
+}
+
+// CompressScreenshot downscales a PNG screenshot to 50% and converts to JPEG (quality 70).
+// Only applies to files matching screenshot_*.png — returns the original path for anything else.
+// Returns the path to the compressed JPEG file.
+func CompressScreenshot(path string) (string, error) {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "screenshot_") || !strings.HasSuffix(strings.ToLower(base), ".png") {
+		return path, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open screenshot: %w", err)
+	}
+	defer f.Close()
+
+	src, err := png.Decode(f)
+	if err != nil {
+		return "", fmt.Errorf("decode png: %w", err)
+	}
+
+	bounds := src.Bounds()
+	newW := bounds.Dx() / 2
+	newH := bounds.Dy() / 2
+	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
+	draw.BiLinear.Scale(dst, dst.Bounds(), src, bounds, draw.Over, nil)
+
+	jpegPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
+	out, err := os.Create(jpegPath)
+	if err != nil {
+		return "", fmt.Errorf("create jpeg: %w", err)
+	}
+	defer out.Close()
+
+	if err := jpeg.Encode(out, dst, &jpeg.Options{Quality: 70}); err != nil {
+		os.Remove(jpegPath)
+		return "", fmt.Errorf("encode jpeg: %w", err)
+	}
+
+	// Remove original PNG to save disk space
+	os.Remove(path)
+
+	logger.DebugCF("media", "Compressed screenshot",
+		map[string]interface{}{
+			"original": base,
+			"new_size": fmt.Sprintf("%dx%d", newW, newH),
+			"path":     jpegPath,
+		})
+
+	return jpegPath, nil
 }
 
 // IsAudioFile checks if a file is an audio file based on its filename extension and content type.

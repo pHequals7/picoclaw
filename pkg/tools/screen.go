@@ -352,6 +352,37 @@ func (t *ScreenInfoTool) Execute(ctx context.Context, args map[string]interface{
 	return screenInfo(ctx)
 }
 
+// ScreenWaitTool waits for a specified duration without an LLM round-trip.
+type ScreenWaitTool struct{}
+
+func NewScreenWaitTool() *ScreenWaitTool { return &ScreenWaitTool{} }
+
+func (t *ScreenWaitTool) Name() string { return "screen_wait" }
+
+func (t *ScreenWaitTool) Description() string {
+	return "Wait for a specified number of seconds without taking any action. Use this to wait for videos to load, animations to complete, or content to appear. Avoids wasting an LLM round-trip on polling. Range: 1-120 seconds."
+}
+
+func (t *ScreenWaitTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"seconds": map[string]interface{}{
+				"type":        "integer",
+				"description": "Number of seconds to wait (1-120, default 5)",
+			},
+		},
+	}
+}
+
+func (t *ScreenWaitTool) Execute(ctx context.Context, args map[string]interface{}) *ToolResult {
+	seconds := 5
+	if s, ok := args["seconds"].(float64); ok && s > 0 {
+		seconds = int(s)
+	}
+	return screenWait(ctx, seconds)
+}
+
 // UIElementsTool dumps the Android UI hierarchy and returns a structured element list.
 type UIElementsTool struct{}
 

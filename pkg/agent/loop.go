@@ -119,6 +119,7 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	registry.Register(tools.NewAppLaunchTool())
 	registry.Register(tools.NewScreenInfoTool())
 	registry.Register(tools.NewUIElementsTool())
+	registry.Register(tools.NewScreenWaitTool())
 
 	// Debug tool - lets the LLM read its own logs to diagnose issues
 	registry.Register(tools.NewDebugLogsTool(workspace))
@@ -792,6 +793,26 @@ func isPathWithin(path, dir string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
+// pruneOldMedia strips Media (base64 screenshots) from all but the last
+// keepLast tool-result messages. This prevents context from growing unboundedly
+// when the agent takes many screenshots during a multi-step UI task.
+func pruneOldMedia(messages []providers.Message, keepLast int) {
+	// Count tool messages with media, walking in reverse
+	mediaCount := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "tool" && len(messages[i].Media) > 0 {
+			mediaCount++
+			if mediaCount > keepLast {
+				messages[i].Media = nil
+				// Add a note so the model knows there was an image here
+				if !strings.Contains(messages[i].Content, "[Previous screenshot omitted") {
+					messages[i].Content += "\n[Previous screenshot omitted from context]"
+				}
+			}
+		}
+	}
+}
+
 // runLLMIteration executes the LLM call loop with tool handling.
 // Returns the final content, iteration count, and any error.
 func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.Message, opts processOptions) (string, int, error) {
@@ -842,6 +863,9 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				"messages_json": formatMessagesForLog(messages),
 				"tools_json":    formatToolsForLog(providerToolDefs),
 			})
+
+		// Prune old screenshots from context to keep token count flat
+		pruneOldMedia(messages, 2)
 
 		// Call LLM using routed model/provider
 		response, err := activeProvider.Chat(ctx, messages, providerToolDefs, activeModel, map[string]interface{}{

@@ -35,6 +35,10 @@ func appLaunch(ctx context.Context, pkg string) *ToolResult {
 	return ErrorResult("app_launch is only available on Android/Termux")
 }
 
+func screenWait(ctx context.Context, seconds int) *ToolResult {
+	return ErrorResult("screen_wait is only available on Android/Termux")
+}
+
 func screenInfo(ctx context.Context) *ToolResult {
 	return ErrorResult("screen_info is only available on Android/Termux")
 }

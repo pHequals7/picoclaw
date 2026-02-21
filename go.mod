@@ -20,7 +20,10 @@ require (
 	golang.org/x/oauth2 v0.35.0
 )
 
-require github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+require (
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/image v0.36.0 // indirect
+)
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
