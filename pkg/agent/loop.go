@@ -110,6 +110,15 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	registry.Register(tools.NewPhoneCallTool())
 	registry.Register(tools.NewPhoneInfoTool())
 
+	// Screen interaction tools (Android/ADB loopback, returns error on other platforms)
+	registry.Register(tools.NewScreenshotTool(workspace))
+	registry.Register(tools.NewScreenTapTool())
+	registry.Register(tools.NewScreenSwipeTool())
+	registry.Register(tools.NewScreenKeyTool())
+	registry.Register(tools.NewScreenTextTool())
+	registry.Register(tools.NewAppLaunchTool())
+	registry.Register(tools.NewScreenInfoTool())
+
 	// Message tool - available to both agent and subagent
 	// Subagent uses it to communicate directly with user
 	messageTool := tools.NewMessageTool()
@@ -267,8 +276,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			}
 
 			if response != "" {
-				// Check if the message tool already sent a response during this round.
-				// If so, skip publishing to avoid duplicate messages to the user.
+				// Check if the message tool already sent content during this round.
 				alreadySent := false
 				if tool, ok := al.tools.Get("message"); ok {
 					if mt, ok := tool.(*tools.MessageTool); ok {
@@ -276,14 +284,23 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 					}
 				}
 
-				if !alreadySent {
+				if alreadySent {
+					// Message tool already sent intermediate content. Send an empty
+					// outbound message to clean up the Telegram placeholder without
+					// duplicating the response.
+					al.bus.PublishOutbound(bus.OutboundMessage{
+						Channel: msg.Channel,
+						ChatID:  msg.ChatID,
+						Content: "",
+					})
+				} else {
 					al.bus.PublishOutbound(bus.OutboundMessage{
 						Channel: msg.Channel,
 						ChatID:  msg.ChatID,
 						Content: response,
 					})
-					al.maybeSendSwitchbackPrompt(msg.Channel, msg.ChatID)
 				}
+				al.maybeSendSwitchbackPrompt(msg.Channel, msg.ChatID)
 			}
 		}
 	}
@@ -861,6 +878,26 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				}
 			}
 
+			// Failover on timeout errors (context deadline exceeded, client timeout)
+			if err != nil && al.failoverMgr != nil && al.failoverMgr.Enabled() && isTimeoutError(err) {
+				logger.WarnCF("agent", "LLM call timed out, attempting failover",
+					map[string]interface{}{
+						"model":          activeModel,
+						"error":          err.Error(),
+						"correlation_id": opts.CorrelationID,
+					})
+				retryRoute, routeErr := al.failoverMgr.ResolveRoute()
+				if routeErr == nil && retryRoute.Model != activeModel {
+					activeProvider = retryRoute.Provider
+					activeModel = retryRoute.Model
+					switchEpoch = retryRoute.SwitchEpoch
+					response, err = activeProvider.Chat(ctx, messages, providerToolDefs, activeModel, map[string]interface{}{
+						"max_tokens":  8192,
+						"temperature": 0.7,
+					})
+				}
+			}
+
 			if err != nil {
 				logger.ErrorCF("agent", "LLM call failed",
 					map[string]interface{}{
@@ -1199,6 +1236,16 @@ func (al *AgentLoop) notifyFailoverSwitch(channel, chatID string, event failover
 		ChatID:  chatID,
 		Content: fmt.Sprintf("Failover active: switched from %s to %s due to provider rate limits.", event.FromModel, event.ToModel),
 	})
+}
+
+// isTimeoutError returns true if the error is a timeout or deadline exceeded error.
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "context deadline exceeded") ||
+		strings.Contains(errStr, "Client.Timeout")
 }
 
 func providerFromModel(model string) string {
