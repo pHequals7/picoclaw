@@ -53,20 +53,21 @@ func TestOnLLMRateLimitedAdvancesFallbackChain(t *testing.T) {
 	}
 }
 
-func TestSwitchbackPromptCooldown(t *testing.T) {
+func TestConsumeSwitchbackPrompt_OneShot(t *testing.T) {
 	m := newTestManager(t)
 	_ = m.OnLLMRateLimited(m.PrimaryModel(), nil)
 	m.mu.Lock()
 	m.fs.Mode = modeAwaitingUserSwitchbk
 	m.fs.LastSwitchbackProbe = "healthy"
+	m.fs.SwitchbackPromptSent = false
 	m.mu.Unlock()
 
 	now := time.Now()
-	if _, ok := m.ShouldSendSwitchbackPrompt(now); !ok {
+	if _, ok := m.ConsumeSwitchbackPrompt(now); !ok {
 		t.Fatalf("expected first prompt")
 	}
-	if _, ok := m.ShouldSendSwitchbackPrompt(now.Add(1 * time.Minute)); ok {
-		t.Fatalf("did not expect prompt during cooldown")
+	if _, ok := m.ConsumeSwitchbackPrompt(now.Add(1 * time.Minute)); ok {
+		t.Fatalf("did not expect repeated prompt in same failover cycle")
 	}
 }
 
@@ -101,5 +102,22 @@ func TestProbeAutoSwitchbackWithoutApproval(t *testing.T) {
 	}
 	if snap := m.Snapshot(); snap.Mode != modeNormal {
 		t.Fatalf("expected normal mode after auto switchback, got %s", snap.Mode)
+	}
+}
+
+func TestNewFailoverCycleResetsPromptSent(t *testing.T) {
+	m := newTestManager(t)
+	_ = m.OnLLMRateLimited(m.PrimaryModel(), nil)
+	m.mu.Lock()
+	m.fs.Mode = modeAwaitingUserSwitchbk
+	m.fs.SwitchbackPromptSent = true
+	m.mu.Unlock()
+
+	evt := m.OnLLMRateLimited("gpt-5-mini", nil)
+	if !evt.Switched {
+		t.Fatalf("expected switch to next fallback")
+	}
+	if snap := m.Snapshot(); snap.SwitchbackPromptSent {
+		t.Fatalf("expected switchback prompt sent flag reset in new failover cycle")
 	}
 }

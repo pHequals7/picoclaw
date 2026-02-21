@@ -224,11 +224,12 @@ func TestSetFailoverStatePersistence(t *testing.T) {
 
 	sm := NewManager(tmpDir)
 	fs := FailoverState{
-		Mode:          "degraded",
-		PrimaryModel:  "claude-sonnet-4-5-20250929",
-		ActiveModel:   "gpt-5-mini",
-		FallbackIndex: 0,
-		SwitchEpoch:   3,
+		Mode:                 "degraded",
+		PrimaryModel:         "claude-sonnet-4-5-20250929",
+		ActiveModel:          "gpt-5-mini",
+		FallbackIndex:        0,
+		SwitchbackPromptSent: true,
+		SwitchEpoch:          3,
 	}
 	if err := sm.SetFailoverState(fs); err != nil {
 		t.Fatalf("SetFailoverState failed: %v", err)
@@ -236,7 +237,7 @@ func TestSetFailoverStatePersistence(t *testing.T) {
 
 	sm2 := NewManager(tmpDir)
 	got := sm2.GetFailoverState()
-	if got.ActiveModel != "gpt-5-mini" || got.Mode != "degraded" || got.SwitchEpoch != 3 {
+	if got.ActiveModel != "gpt-5-mini" || got.Mode != "degraded" || got.SwitchEpoch != 3 || !got.SwitchbackPromptSent {
 		t.Fatalf("unexpected failover state after reload: %+v", got)
 	}
 }

@@ -41,6 +41,7 @@ type FailoverState struct {
 	LastSwitchReason          string    `json:"last_switch_reason,omitempty"`
 	LastSwitchbackPromptAt    time.Time `json:"last_switchback_prompt_at,omitempty"`
 	LastSwitchbackProbe       string    `json:"last_switchback_probe,omitempty"`
+	SwitchbackPromptSent      bool      `json:"switchback_prompt_sent,omitempty"`
 	SwitchEpoch               int64     `json:"switch_epoch"`
 }
 
