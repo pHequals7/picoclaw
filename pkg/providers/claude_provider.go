@@ -142,9 +142,35 @@ func buildClaudeParams(messages []Message, tools []ToolDefinition, model string,
 				)
 			}
 		case "tool":
-			anthropicMessages = append(anthropicMessages,
-				anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)),
-			)
+			if len(msg.Media) > 0 {
+				// Build multi-content tool result with text + images
+				content := []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: msg.Content}},
+				}
+				for _, img := range msg.Media {
+					content = append(content, anthropic.ToolResultBlockParamContentUnion{
+						OfImage: &anthropic.ImageBlockParam{
+							Source: anthropic.ImageBlockParamSourceUnion{
+								OfBase64: &anthropic.Base64ImageSourceParam{
+									Data:      img.Base64Data,
+									MediaType: anthropic.Base64ImageSourceMediaType(img.MimeType),
+								},
+							},
+						},
+					})
+				}
+				toolBlock := anthropic.ToolResultBlockParam{
+					ToolUseID: msg.ToolCallID,
+					Content:   content,
+				}
+				anthropicMessages = append(anthropicMessages,
+					anthropic.NewUserMessage(anthropic.ContentBlockParamUnion{OfToolResult: &toolBlock}),
+				)
+			} else {
+				anthropicMessages = append(anthropicMessages,
+					anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)),
+				)
+			}
 		}
 	}
 

@@ -1143,6 +1143,22 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				Content:    contentForLLM,
 				ToolCallID: tc.ID,
 			}
+
+			// Attach images from tool result for LLM vision
+			if len(toolResult.Images) > 0 {
+				for _, imgPath := range toolResult.Images {
+					mimeType, b64, err := utils.LoadAndEncodeImage(imgPath)
+					if err != nil {
+						logger.WarnCF("agent", "Failed to encode tool result image",
+							map[string]interface{}{"path": imgPath, "error": err.Error()})
+						continue
+					}
+					toolResultMsg.Media = append(toolResultMsg.Media, providers.MediaImage{
+						MimeType: mimeType, Base64Data: b64,
+					})
+				}
+			}
+
 			messages = append(messages, toolResultMsg)
 
 			// Save tool result message to session
