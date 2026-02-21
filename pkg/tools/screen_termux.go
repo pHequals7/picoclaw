@@ -12,9 +12,20 @@ import (
 	"time"
 )
 
+// adbSerial is the ADB device serial to target. Defaults to localhost:5555
+// (loopback ADB) but can be overridden via ANDROID_SERIAL env var.
+func adbSerial() string {
+	if s := os.Getenv("ANDROID_SERIAL"); s != "" {
+		return s
+	}
+	return "localhost:5555"
+}
+
 // runADBCommandImpl executes an adb command and returns its output.
+// It always targets a specific device via -s to avoid "more than one device" errors.
 func runADBCommandImpl(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "adb", args...)
+	fullArgs := append([]string{"-s", adbSerial()}, args...)
+	cmd := exec.CommandContext(ctx, "adb", fullArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("adb %s: %w (output: %s)", strings.Join(args, " "), err, string(out))
