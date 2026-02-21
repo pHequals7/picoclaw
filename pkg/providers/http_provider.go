@@ -41,9 +41,13 @@ type HTTPProvider struct {
 	httpClient *http.Client
 }
 
-func NewHTTPProvider(apiKey, apiBase, proxy string) *HTTPProvider {
+func NewHTTPProvider(apiKey, apiBase, proxy string, timeoutSeconds ...int) *HTTPProvider {
+	timeout := 120
+	if len(timeoutSeconds) > 0 && timeoutSeconds[0] > 0 {
+		timeout = timeoutSeconds[0]
+	}
 	client := &http.Client{
-		Timeout: 120 * time.Second,
+		Timeout: time.Duration(timeout) * time.Second,
 	}
 
 	if proxy != "" {
@@ -504,7 +508,7 @@ func createProviderWithSelection(cfg *config.Config, model string, provider stri
 		return nil, fmt.Errorf("no API base configured for provider (model: %s)", model)
 	}
 
-	return NewHTTPProvider(apiKey, apiBase, proxy), nil
+	return NewHTTPProvider(apiKey, apiBase, proxy, cfg.Agents.Defaults.HTTPTimeout), nil
 }
 
 // CreateProviderForModel creates a provider resolved from a specific model name,
