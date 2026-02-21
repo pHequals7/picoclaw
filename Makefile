@@ -78,6 +78,13 @@ build: generate
 	@echo "Build complete: $(BINARY_PATH)"
 	@ln -sf $(BINARY_NAME)-$(PLATFORM)-$(ARCH) $(BUILD_DIR)/$(BINARY_NAME)
 
+## build-android: Build picoclaw for Android (Termux, ARM64)
+build-android: generate
+	@echo "Building $(BINARY_NAME) for android/arm64 (Termux)..."
+	@mkdir -p $(BUILD_DIR)
+	@GOOS=linux GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-android-arm64 ./$(CMD_DIR)
+	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)-android-arm64"
+
 ## build-all: Build picoclaw for all platforms
 build-all: generate
 	@echo "Building for multiple platforms..."

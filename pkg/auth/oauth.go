@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -410,10 +411,19 @@ func openBrowser(url string) error {
 	case "darwin":
 		return exec.Command("open", url).Start()
 	case "linux":
+		// On Termux (Android), use termux-open-url instead of xdg-open
+		if isTermuxEnv() {
+			return exec.Command("termux-open-url", url).Start()
+		}
 		return exec.Command("xdg-open", url).Start()
 	case "windows":
 		return exec.Command("cmd", "/c", "start", url).Start()
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
+}
+
+// isTermuxEnv checks if we're running inside Termux without importing the utils package.
+func isTermuxEnv() bool {
+	return os.Getenv("TERMUX_VERSION") != ""
 }

@@ -104,6 +104,12 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	registry.Register(tools.NewI2CTool())
 	registry.Register(tools.NewSPITool())
 
+	// Telephony tools (Termux/Android only, returns error on other platforms)
+	registry.Register(tools.NewSMSSendTool())
+	registry.Register(tools.NewSMSListTool())
+	registry.Register(tools.NewPhoneCallTool())
+	registry.Register(tools.NewPhoneInfoTool())
+
 	// Message tool - available to both agent and subagent
 	// Subagent uses it to communicate directly with user
 	messageTool := tools.NewMessageTool()
