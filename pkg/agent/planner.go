@@ -82,7 +82,7 @@ func (al *AgentLoop) generateExecutionPlanBullets(ctx context.Context, opts proc
 	}
 
 	response, err := plannerProvider.Chat(ctx, plannerMessages, nil, plannerModel, map[string]interface{}{
-		"max_tokens":  300,
+		"max_tokens":  4096,
 		"temperature": 0.1,
 	})
 	if err != nil {
