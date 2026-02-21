@@ -26,7 +26,9 @@ Guidance:
 - Prefer 4-6 steps, but fewer steps are allowed when the task is simple.
 - Use imperative action language (e.g., "Take screenshot to see current screen", "Tap search icon at coordinates", "Type query into search field").
 - For UI automation tasks, start with ui_elements to get exact tap coordinates, or screenshot for visual context.
-- For multi-step app interactions, include screenshot checkpoints between actions to verify state.
+- Batch consecutive actions (tap + type + enter) into single steps where possible.
+- Only include screenshot/ui_elements steps at decision points, not after every action.
+- For media playback, use screen_wait for the expected duration instead of polling.
 - Ground steps in the provided request and candidate tool actions.
 - Do not include headings, notes, explanations, or markdown fences.
 - Do not mention policies.`

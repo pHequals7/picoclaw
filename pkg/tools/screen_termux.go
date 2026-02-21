@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 // uiNode represents a single node in the Android UI hierarchy XML.
@@ -140,61 +142,47 @@ func flattenNodes(nodes []uiNode, out *[]parsedElement) {
 	}
 }
 
-// formatElements formats parsed elements into a compact text list for the LLM.
+// formatElements formats parsed elements into a compact single-line format for the LLM.
+// Format: [1] Button "Search" (650,95) clickable [desc: Search]
 func formatElements(pkg string, elements []parsedElement) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("UI Elements (%s, %d elements):\n\n", pkg, len(elements)))
 
 	for i, el := range elements {
-		// [1] Button "Search" @ (650, 95) clickable [id: menu_search]
 		sb.WriteString(fmt.Sprintf("[%d] %s", i+1, el.class))
 
-		// Text label
 		if el.text != "" {
 			sb.WriteString(fmt.Sprintf(" %q", el.text))
 		}
 
-		// Coordinates
-		sb.WriteString(fmt.Sprintf(" @ (%d, %d)", el.centerX, el.centerY))
+		sb.WriteString(fmt.Sprintf(" (%d,%d)", el.centerX, el.centerY))
 
-		// State flags
-		var flags []string
+		// Compact flags
 		if el.clickable {
-			flags = append(flags, "clickable")
+			sb.WriteString(" clickable")
 		}
 		if el.focused {
-			flags = append(flags, "focused")
+			sb.WriteString(" focused")
 		}
 		if el.scrollable {
-			flags = append(flags, "scrollable")
-		}
-		if el.selected {
-			flags = append(flags, "selected")
+			sb.WriteString(" scrollable")
 		}
 		if !el.enabled {
-			flags = append(flags, "disabled")
-		}
-		if len(flags) > 0 {
-			sb.WriteString(" " + strings.Join(flags, " "))
+			sb.WriteString(" disabled")
 		}
 
-		// Identifiers
-		var ids []string
-		if el.resourceID != "" {
-			ids = append(ids, "id: "+el.resourceID)
-		}
+		// Only show content-desc; skip resource-id unless text and desc are both empty
 		if el.contentDesc != "" {
-			ids = append(ids, "desc: "+el.contentDesc)
-		}
-		if len(ids) > 0 {
-			sb.WriteString(" [" + strings.Join(ids, ", ") + "]")
+			sb.WriteString(fmt.Sprintf(" [desc: %s]", el.contentDesc))
+		} else if el.text == "" && el.resourceID != "" {
+			sb.WriteString(fmt.Sprintf(" [id: %s]", el.resourceID))
 		}
 
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("\nTo tap an element, use screen_tap with the coordinates shown.")
+	sb.WriteString("\nUse screen_tap with coordinates to tap an element.")
 	return sb.String()
 }
 
@@ -251,9 +239,9 @@ func uiElementsDump(ctx context.Context) *ToolResult {
 		return elements[i].centerY < elements[j].centerY
 	})
 
-	// Cap at 50 elements
-	if len(elements) > 50 {
-		elements = elements[:50]
+	// Cap at 30 elements to keep context compact
+	if len(elements) > 30 {
+		elements = elements[:30]
 	}
 
 	// Detect package from root node
@@ -309,8 +297,15 @@ func screenshotExecute(ctx context.Context, workspace string) *ToolResult {
 	// Clean up remote file
 	runADBShell(ctx, "rm", remotePath)
 
-	result := SilentResult(fmt.Sprintf("Screenshot saved to %s. I can see the screen contents via vision. Use send_file to share this image with the user if needed.", localPath))
-	result.Images = []string{localPath}
+	// Compress screenshot: downscale 50% + JPEG conversion for smaller context
+	compressedPath, compErr := utils.CompressScreenshot(localPath)
+	if compErr != nil {
+		// Fall back to original if compression fails
+		compressedPath = localPath
+	}
+
+	result := SilentResult(fmt.Sprintf("Screenshot saved to %s. I can see the screen contents via vision. Use send_file to share this image with the user if needed.", compressedPath))
+	result.Images = []string{compressedPath}
 	return result
 }
 
@@ -369,6 +364,21 @@ func appLaunch(ctx context.Context, pkg string) *ToolResult {
 		return ErrorResult(fmt.Sprintf("Failed to launch %s: %v", pkg, err))
 	}
 	return SilentResult(fmt.Sprintf("Launched app: %s", pkg))
+}
+
+func screenWait(ctx context.Context, seconds int) *ToolResult {
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds > 120 {
+		seconds = 120
+	}
+	select {
+	case <-time.After(time.Duration(seconds) * time.Second):
+		return SilentResult(fmt.Sprintf("Waited %d seconds", seconds))
+	case <-ctx.Done():
+		return ErrorResult("Wait cancelled")
+	}
 }
 
 func screenInfo(ctx context.Context) *ToolResult {
