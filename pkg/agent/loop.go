@@ -58,17 +58,18 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string        // Session identifier for history/context
-	Channel         string        // Target channel for tool execution
-	ChatID          string        // Target chat ID for tool execution
-	UserMessage     string        // User message content (may include prefix)
-	DefaultResponse string        // Response when LLM returns empty
-	EnableSummary   bool          // Whether to trigger summarization
-	SendResponse    bool          // Whether to send response via bus
-	NoHistory       bool          // If true, don't load session history (for heartbeat)
-	CorrelationID   string        // Correlation ID for request tracing
-	ActionStream    *ActionStream // Action stream for visibility (optional)
-	Media           []string      // Media file paths (images, etc.)
+	SessionKey           string        // Session identifier for history/context
+	Channel              string        // Target channel for tool execution
+	ChatID               string        // Target chat ID for tool execution
+	UserMessage          string        // User message content (may include prefix)
+	DefaultResponse      string        // Response when LLM returns empty
+	EnableSummary        bool          // Whether to trigger summarization
+	SendResponse         bool          // Whether to send response via bus
+	AllowProgressUpdates bool          // Whether to send execution plan/progress updates
+	NoHistory            bool          // If true, don't load session history (for heartbeat)
+	CorrelationID        string        // Correlation ID for request tracing
+	ActionStream         *ActionStream // Action stream for visibility (optional)
+	Media                []string      // Media file paths (images, etc.)
 }
 
 // createToolRegistry creates a tool registry with common tools.
@@ -275,6 +276,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 						ChatID:  msg.ChatID,
 						Content: response,
 					})
+					al.maybeSendSwitchbackPrompt(msg.Channel, msg.ChatID)
 				}
 			}
 		}
@@ -323,14 +325,15 @@ func (al *AgentLoop) ProcessDirectWithChannel(ctx context.Context, content, sess
 // Each heartbeat is independent and doesn't accumulate context.
 func (al *AgentLoop) ProcessHeartbeat(ctx context.Context, content, channel, chatID string) (string, error) {
 	return al.runAgentLoop(ctx, processOptions{
-		SessionKey:      "heartbeat",
-		Channel:         channel,
-		ChatID:          chatID,
-		UserMessage:     content,
-		DefaultResponse: "I've completed processing but have no response to give.",
-		EnableSummary:   false,
-		SendResponse:    false,
-		NoHistory:       true, // Don't load session history for heartbeat
+		SessionKey:           "heartbeat",
+		Channel:              channel,
+		ChatID:               chatID,
+		UserMessage:          content,
+		DefaultResponse:      "I've completed processing but have no response to give.",
+		EnableSummary:        false,
+		SendResponse:         false,
+		AllowProgressUpdates: false,
+		NoHistory:            true, // Don't load session history for heartbeat
 	})
 }
 
@@ -367,7 +370,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			}
 			return "Acknowledged.", nil
 		}
-		al.maybeRunFailoverProbe(msg.Channel, msg.ChatID)
+		al.maybeRunFailoverProbe()
 	}
 
 	// Create ActionStream for visibility if enabled
@@ -387,16 +390,17 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 
 	// Process as user message
 	return al.runAgentLoop(ctx, processOptions{
-		SessionKey:      msg.SessionKey,
-		Channel:         msg.Channel,
-		ChatID:          msg.ChatID,
-		UserMessage:     msg.Content,
-		DefaultResponse: "I've completed processing but have no response to give.",
-		EnableSummary:   true,
-		SendResponse:    false,
-		CorrelationID:   msg.CorrelationID,
-		ActionStream:    actionStream,
-		Media:           msg.Media,
+		SessionKey:           msg.SessionKey,
+		Channel:              msg.Channel,
+		ChatID:               msg.ChatID,
+		UserMessage:          msg.Content,
+		DefaultResponse:      "I've completed processing but have no response to give.",
+		EnableSummary:        true,
+		SendResponse:         false,
+		AllowProgressUpdates: true,
+		CorrelationID:        msg.CorrelationID,
+		ActionStream:         actionStream,
+		Media:                msg.Media,
 	})
 }
 
@@ -953,7 +957,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			}
 
 			planMsg := formatExecutionPlanProgressWithArtifact(planState.Bullets, planPath)
-			if opts.Channel != "" && opts.ChatID != "" {
+			if shouldPublishProgress(opts) {
 				// Send the plan as a regular message so it remains persistent in chat.
 				// Telegram channel logic will finalize the current placeholder for this message.
 				al.bus.PublishOutbound(bus.OutboundMessage{
@@ -1012,7 +1016,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				planState.Allowed[tcName] = struct{}{}
 
 				updateMsg := formatPlanUpdateProgress(updateStep)
-				if opts.Channel != "" && opts.ChatID != "" {
+				if shouldPublishProgress(opts) {
 					al.bus.PublishOutbound(bus.OutboundMessage{
 						Channel:          opts.Channel,
 						ChatID:           opts.ChatID,
@@ -1111,7 +1115,11 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 	return finalContent, iteration, nil
 }
 
-func (al *AgentLoop) maybeRunFailoverProbe(channel, chatID string) {
+func shouldPublishProgress(opts processOptions) bool {
+	return opts.AllowProgressUpdates && opts.Channel != "" && opts.ChatID != ""
+}
+
+func (al *AgentLoop) maybeRunFailoverProbe() {
 	if al.failoverMgr == nil || !al.failoverMgr.Enabled() {
 		return
 	}
@@ -1135,23 +1143,29 @@ func (al *AgentLoop) maybeRunFailoverProbe(channel, chatID string) {
 				"next_probe_at":  outcome.NextProbeAt.UTC().Format(time.RFC3339),
 			})
 
-		if channel == "" || chatID == "" {
-			return
-		}
-		prompt := strings.TrimSpace(outcome.PromptText)
-		if prompt == "" {
-			if p, ok := al.failoverMgr.ShouldSendSwitchbackPrompt(time.Now()); ok {
-				prompt = p
-			}
-		}
-		if prompt != "" {
-			al.bus.PublishOutbound(bus.OutboundMessage{
-				Channel: channel,
-				ChatID:  chatID,
-				Content: prompt,
-			})
-		}
 	}()
+}
+
+func (al *AgentLoop) maybeSendSwitchbackPrompt(channel, chatID string) {
+	if al.failoverMgr == nil || !al.failoverMgr.Enabled() {
+		return
+	}
+	if channel == "" || chatID == "" {
+		return
+	}
+	prompt, ok := al.failoverMgr.ConsumeSwitchbackPrompt(time.Now())
+	if !ok {
+		return
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return
+	}
+	al.bus.PublishOutbound(bus.OutboundMessage{
+		Channel: channel,
+		ChatID:  chatID,
+		Content: prompt,
+	})
 }
 
 func (al *AgentLoop) notifyFailoverSwitch(channel, chatID string, event failover.SwitchEvent) {

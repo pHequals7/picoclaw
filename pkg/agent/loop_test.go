@@ -527,3 +527,48 @@ func TestToolResult_UserFacingToolDoesSendMessage(t *testing.T) {
 		t.Errorf("Expected 'Command output: hello world', got: %s", response)
 	}
 }
+
+func TestShouldPublishProgress(t *testing.T) {
+	tests := []struct {
+		name string
+		opts processOptions
+		want bool
+	}{
+		{
+			name: "user message with updates enabled",
+			opts: processOptions{
+				Channel:              "telegram",
+				ChatID:               "123",
+				AllowProgressUpdates: true,
+			},
+			want: true,
+		},
+		{
+			name: "heartbeat style with updates disabled",
+			opts: processOptions{
+				Channel:              "telegram",
+				ChatID:               "123",
+				AllowProgressUpdates: false,
+			},
+			want: false,
+		},
+		{
+			name: "missing chat routing context",
+			opts: processOptions{
+				Channel:              "",
+				ChatID:               "",
+				AllowProgressUpdates: true,
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldPublishProgress(tc.opts)
+			if got != tc.want {
+				t.Fatalf("shouldPublishProgress()=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -214,6 +214,7 @@ func (m *Manager) OnLLMRateLimited(model string, err error) SwitchEvent {
 	m.fs.NextProbeAt = holdUntil
 	m.fs.ConsecutiveProbeSuccesses = 0
 	m.fs.LastSwitchReason = "rate_limited"
+	m.fs.SwitchbackPromptSent = false
 	m.fs.SwitchEpoch++
 	m.persistLocked()
 
@@ -286,11 +287,9 @@ func (m *Manager) recordProbeResult(success bool, err error) ProbeOutcome {
 		m.fs.ConsecutiveProbeSuccesses++
 		m.fs.LastSwitchbackProbe = fmt.Sprintf("%d/%d successful probes as of %s", m.fs.ConsecutiveProbeSuccesses, threshold, now.Format(time.RFC3339))
 		m.fs.NextProbeAt = now.Add(interval)
-		prompt := ""
 		if m.fs.ConsecutiveProbeSuccesses >= threshold {
 			if m.cfg.Agents.Failover.SwitchbackRequiresApproval {
 				m.fs.Mode = modeAwaitingUserSwitchbk
-				prompt = m.buildSwitchbackPromptLocked(now)
 			} else {
 				m.fs.Mode = modeNormal
 				m.fs.ActiveModel = m.primary
@@ -298,16 +297,18 @@ func (m *Manager) recordProbeResult(success bool, err error) ProbeOutcome {
 				m.fs.LastSwitchReason = "auto_switchback_probe_healthy"
 				m.fs.LastSwitchbackPromptAt = time.Time{}
 				m.fs.LastSwitchbackProbe = ""
+				m.fs.SwitchbackPromptSent = false
 				m.fs.SwitchEpoch++
 			}
 		}
 		m.persistLocked()
-		return ProbeOutcome{Success: true, BecameHealthy: m.fs.ConsecutiveProbeSuccesses >= threshold, PromptText: prompt, NextProbeAt: m.fs.NextProbeAt}
+		return ProbeOutcome{Success: true, BecameHealthy: m.fs.ConsecutiveProbeSuccesses >= threshold, NextProbeAt: m.fs.NextProbeAt}
 	}
 
 	m.fs.ConsecutiveProbeSuccesses = 0
 	m.fs.Mode = modeDegraded
 	m.fs.LastSwitchbackProbe = ""
+	m.fs.SwitchbackPromptSent = false
 	m.fs.NextProbeAt = now.Add(backoff)
 	if rl, ok := err.(*providers.RateLimitError); ok {
 		next := now.Add(hold)
@@ -366,20 +367,24 @@ func (m *Manager) buildSwitchbackPromptLocked(now time.Time) string {
 	)
 }
 
-func (m *Manager) ShouldSendSwitchbackPrompt(now time.Time) (string, bool) {
+func (m *Manager) ConsumeSwitchbackPrompt(now time.Time) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fs.Mode != modeAwaitingUserSwitchbk {
 		return "", false
 	}
-
-	cooldown := time.Duration(maxInt(m.cfg.Agents.Failover.SwitchbackPromptCooldownMins, 1)) * time.Minute
-	if m.fs.LastSwitchbackPromptAt.IsZero() || now.Sub(m.fs.LastSwitchbackPromptAt) >= cooldown {
-		m.fs.LastSwitchbackPromptAt = now
-		m.persistLocked()
-		return m.buildSwitchbackPromptLocked(now), true
+	if m.fs.SwitchbackPromptSent {
+		return "", false
 	}
-	return "", false
+	m.fs.LastSwitchbackPromptAt = now
+	m.fs.SwitchbackPromptSent = true
+	m.persistLocked()
+	return m.buildSwitchbackPromptLocked(now), true
+}
+
+func (m *Manager) ShouldSendSwitchbackPrompt(now time.Time) (string, bool) {
+	// Legacy compatibility: callers should migrate to ConsumeSwitchbackPrompt.
+	return m.ConsumeSwitchbackPrompt(now)
 }
 
 func (m *Manager) HandleUserSwitchbackDecision(text string) DecisionOutcome {
@@ -411,16 +416,17 @@ func (m *Manager) HandleUserSwitchbackDecision(text string) DecisionOutcome {
 		m.fs.LastSwitchReason = "manual_switchback_approved"
 		m.fs.LastSwitchbackPromptAt = time.Time{}
 		m.fs.LastSwitchbackProbe = ""
+		m.fs.SwitchbackPromptSent = false
 		m.fs.SwitchEpoch++
 		m.persistLocked()
 		return DecisionOutcome{Handled: true, Changed: true, Reply: fmt.Sprintf("Switched back to primary model %s from %s.", m.primary, oldActive)}
 	}
 
-	cooldown := time.Duration(maxInt(m.cfg.Agents.Failover.SwitchbackPromptCooldownMins, 1)) * time.Minute
 	m.fs.LastSwitchReason = "manual_switchback_declined"
-	m.fs.LastSwitchbackPromptAt = now.Add(-cooldown + time.Second)
+	m.fs.LastSwitchbackPromptAt = now
+	m.fs.SwitchbackPromptSent = true
 	m.persistLocked()
-	return DecisionOutcome{Handled: true, Changed: false, Reply: fmt.Sprintf("Staying on fallback model %s. I will remind you again later if primary stays healthy.", m.fs.ActiveModel)}
+	return DecisionOutcome{Handled: true, Changed: false, Reply: fmt.Sprintf("Staying on fallback model %s. Ask for failover status any time if you want to switch back later.", m.fs.ActiveModel)}
 }
 
 func (m *Manager) IsUsingPrimary() bool {
