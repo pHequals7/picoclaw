@@ -27,6 +27,11 @@ type ToolResult struct {
 	// When true, the tool will complete later and notify via callback.
 	Async bool `json:"async"`
 
+	// Images holds file paths to images that should be sent to the LLM
+	// via vision/multimodal. Used by tools like screenshot to let the
+	// LLM see visual content. Not JSON serialized to history.
+	Images []string `json:"-"`
+
 	// Err is the underlying error (not JSON serialized).
 	// Used for internal error handling and logging.
 	Err error `json:"-"`

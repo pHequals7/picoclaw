@@ -56,7 +56,9 @@ func screenshotExecute(ctx context.Context, workspace string) *ToolResult {
 	// Clean up remote file
 	runADBShell(ctx, "rm", remotePath)
 
-	return SilentResult(fmt.Sprintf("Screenshot saved to %s — use send_file to send it to the user.", localPath))
+	result := SilentResult(fmt.Sprintf("Screenshot saved to %s. I can see the screen contents via vision. Use send_file to share this image with the user if needed.", localPath))
+	result.Images = []string{localPath}
+	return result
 }
 
 func screenTap(ctx context.Context, x, y int) *ToolResult {

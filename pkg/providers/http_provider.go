@@ -240,8 +240,8 @@ func transformMessagesForOpenAI(messages []Message) []map[string]interface{} {
 			"role": msg.Role,
 		}
 
-		// Only user messages can have images
-		if msg.Role == "user" && len(msg.Media) > 0 {
+		// Support images in user and tool result messages
+		if (msg.Role == "user" || msg.Role == "tool") && len(msg.Media) > 0 {
 			content := []map[string]interface{}{
 				{"type": "text", "text": msg.Content},
 			}
