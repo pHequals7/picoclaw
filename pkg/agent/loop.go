@@ -118,6 +118,7 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	registry.Register(tools.NewScreenTextTool())
 	registry.Register(tools.NewAppLaunchTool())
 	registry.Register(tools.NewScreenInfoTool())
+	registry.Register(tools.NewUIElementsTool())
 
 	// Debug tool - lets the LLM read its own logs to diagnose issues
 	registry.Register(tools.NewDebugLogsTool(workspace))
@@ -951,13 +952,79 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 		// Check if no tool calls - we're done
 		if len(response.ToolCalls) == 0 {
 			finalContent = response.Content
-			logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
-				map[string]interface{}{
-					"iteration":     iteration,
-					"content_chars": len(finalContent),
+
+			// Enhanced diagnostics: log everything we have about the response
+			diagFields := map[string]interface{}{
+				"iteration":      iteration,
+				"content_chars":  len(finalContent),
+				"finish_reason":  response.FinishReason,
+				"model":          activeModel,
+				"messages_count": len(messages),
+				"correlation_id": opts.CorrelationID,
+			}
+			if response.Usage != nil {
+				diagFields["prompt_tokens"] = response.Usage.PromptTokens
+				diagFields["completion_tokens"] = response.Usage.CompletionTokens
+				diagFields["total_tokens"] = response.Usage.TotalTokens
+			}
+
+			// Detect empty response after tool use — likely a model bug, retry once
+			if finalContent == "" && iteration > 1 {
+				if response.RawBody != "" {
+					diagFields["raw_body"] = response.RawBody
+				}
+				logger.WarnCF("agent", "Empty LLM response after tool calls — retrying once",
+					diagFields)
+
+				// Inject a nudge message to prompt the model to continue
+				messages = append(messages, providers.Message{
+					Role:    "user",
+					Content: "[System: Your previous response was empty. You were in the middle of a multi-step task. Please continue where you left off — describe what you've done so far and what the next step is.]",
 				})
+
+				retryResponse, retryErr := activeProvider.Chat(ctx, messages, providerToolDefs, activeModel, map[string]interface{}{
+					"max_tokens":  8192,
+					"temperature": 0.7,
+				})
+				if retryErr == nil && retryResponse.Content != "" {
+					logger.InfoCF("agent", "Empty response retry succeeded",
+						map[string]interface{}{
+							"content_chars":  len(retryResponse.Content),
+							"has_tool_calls": len(retryResponse.ToolCalls) > 0,
+							"finish_reason":  retryResponse.FinishReason,
+						})
+					// If the retry produced tool calls, feed them back into the loop
+					if len(retryResponse.ToolCalls) > 0 {
+						response = retryResponse
+						// Remove the nudge message to keep history clean
+						messages = messages[:len(messages)-1]
+						goto handleToolCalls
+					}
+					finalContent = retryResponse.Content
+				} else {
+					retryErrMsg := "nil"
+					if retryErr != nil {
+						retryErrMsg = retryErr.Error()
+					}
+					logger.WarnCF("agent", "Empty response retry also failed",
+						map[string]interface{}{
+							"retry_error":        retryErrMsg,
+							"retry_content_len":  0,
+							"original_iteration": iteration,
+						})
+				}
+				// Remove the nudge from messages regardless
+				if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
+					messages = messages[:len(messages)-1]
+				}
+			} else {
+				logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
+					diagFields)
+			}
 			break
 		}
+
+	handleToolCalls:
 
 		// Log tool calls
 		toolNames := make([]string, 0, len(response.ToolCalls))
