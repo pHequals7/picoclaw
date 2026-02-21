@@ -119,6 +119,9 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	registry.Register(tools.NewAppLaunchTool())
 	registry.Register(tools.NewScreenInfoTool())
 
+	// Debug tool - lets the LLM read its own logs to diagnose issues
+	registry.Register(tools.NewDebugLogsTool(workspace))
+
 	// Message tool - available to both agent and subagent
 	// Subagent uses it to communicate directly with user
 	messageTool := tools.NewMessageTool()
