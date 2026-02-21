@@ -38,3 +38,7 @@ func appLaunch(ctx context.Context, pkg string) *ToolResult {
 func screenInfo(ctx context.Context) *ToolResult {
 	return ErrorResult("screen_info is only available on Android/Termux")
 }
+
+func uiElementsDump(ctx context.Context) *ToolResult {
+	return ErrorResult("ui_elements is only available on Android/Termux")
+}

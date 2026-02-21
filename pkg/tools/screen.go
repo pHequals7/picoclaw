@@ -351,3 +351,29 @@ func (t *ScreenInfoTool) Execute(ctx context.Context, args map[string]interface{
 
 	return screenInfo(ctx)
 }
+
+// UIElementsTool dumps the Android UI hierarchy and returns a structured element list.
+type UIElementsTool struct{}
+
+func NewUIElementsTool() *UIElementsTool { return &UIElementsTool{} }
+
+func (t *UIElementsTool) Name() string { return "ui_elements" }
+
+func (t *UIElementsTool) Description() string {
+	return "Get a structured list of all UI elements currently on the Android screen with their exact tap coordinates, text labels, and IDs. Returns clickable buttons, text fields, labels, and other interactive elements. Use this to find precise coordinates before tapping instead of guessing from screenshots. Falls back with an error if the screen contains WebViews or games that don't expose UI elements. Requires ADB loopback setup on Android/Termux."
+}
+
+func (t *UIElementsTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
+func (t *UIElementsTool) Execute(ctx context.Context, args map[string]interface{}) *ToolResult {
+	if !utils.IsTermux() {
+		return ErrorResult("ui_elements requires Termux with ADB on Android")
+	}
+
+	return uiElementsDump(ctx)
+}

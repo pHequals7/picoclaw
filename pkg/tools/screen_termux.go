@@ -4,13 +4,266 @@ package tools
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// uiNode represents a single node in the Android UI hierarchy XML.
+type uiNode struct {
+	Index       string   `xml:"index,attr"`
+	Text        string   `xml:"text,attr"`
+	ResourceID  string   `xml:"resource-id,attr"`
+	Class       string   `xml:"class,attr"`
+	Package     string   `xml:"package,attr"`
+	ContentDesc string   `xml:"content-desc,attr"`
+	Clickable   string   `xml:"clickable,attr"`
+	Enabled     string   `xml:"enabled,attr"`
+	Focused     string   `xml:"focused,attr"`
+	Scrollable  string   `xml:"scrollable,attr"`
+	Selected    string   `xml:"selected,attr"`
+	Bounds      string   `xml:"bounds,attr"`
+	Children    []uiNode `xml:"node"`
+}
+
+// uiHierarchy is the root of the Android UI hierarchy XML.
+type uiHierarchy struct {
+	XMLName xml.Name `xml:"hierarchy"`
+	Nodes   []uiNode `xml:"node"`
+}
+
+// parsedElement is a flattened, actionable UI element with computed coordinates.
+type parsedElement struct {
+	class       string
+	text        string
+	contentDesc string
+	resourceID  string
+	centerX     int
+	centerY     int
+	clickable   bool
+	enabled     bool
+	focused     bool
+	scrollable  bool
+	selected    bool
+	priority    int // higher = more relevant
+}
+
+var boundsRegex = regexp.MustCompile(`\[(\d+),(\d+)\]\[(\d+),(\d+)\]`)
+
+// parseBounds extracts center coordinates from bounds string like "[100,200][300,400]".
+func parseBounds(bounds string) (centerX, centerY int, ok bool) {
+	m := boundsRegex.FindStringSubmatch(bounds)
+	if len(m) != 5 {
+		return 0, 0, false
+	}
+	left, _ := strconv.Atoi(m[1])
+	top, _ := strconv.Atoi(m[2])
+	right, _ := strconv.Atoi(m[3])
+	bottom, _ := strconv.Atoi(m[4])
+	return (left + right) / 2, (top + bottom) / 2, true
+}
+
+// shortenClass turns "android.widget.Button" into "Button".
+func shortenClass(class string) string {
+	if idx := strings.LastIndex(class, "."); idx >= 0 {
+		return class[idx+1:]
+	}
+	return class
+}
+
+// shortenResourceID strips the package prefix from resource IDs.
+// "com.google.android.youtube:id/menu_search" → "menu_search"
+func shortenResourceID(id string) string {
+	if idx := strings.LastIndex(id, "/"); idx >= 0 {
+		return id[idx+1:]
+	}
+	return id
+}
+
+// flattenNodes recursively walks the UI tree and collects actionable elements.
+func flattenNodes(nodes []uiNode, out *[]parsedElement) {
+	for _, n := range nodes {
+		hasText := n.Text != ""
+		hasDesc := n.ContentDesc != ""
+		hasID := n.ResourceID != ""
+		isClickable := n.Clickable == "true"
+		isEnabled := n.Enabled == "true"
+		isFocused := n.Focused == "true"
+		isScrollable := n.Scrollable == "true"
+		isSelected := n.Selected == "true"
+
+		// Keep elements that are interactive or have identifying info
+		if hasText || hasDesc || hasID || isClickable {
+			cx, cy, ok := parseBounds(n.Bounds)
+			if ok && cx > 0 && cy > 0 {
+				// Compute priority for sorting (higher = more relevant)
+				p := 0
+				if isClickable && isEnabled {
+					p += 10
+				}
+				if hasText {
+					p += 5
+				}
+				if hasDesc {
+					p += 3
+				}
+				if hasID {
+					p += 1
+				}
+
+				*out = append(*out, parsedElement{
+					class:       shortenClass(n.Class),
+					text:        n.Text,
+					contentDesc: n.ContentDesc,
+					resourceID:  shortenResourceID(n.ResourceID),
+					centerX:     cx,
+					centerY:     cy,
+					clickable:   isClickable,
+					enabled:     isEnabled,
+					focused:     isFocused,
+					scrollable:  isScrollable,
+					selected:    isSelected,
+					priority:    p,
+				})
+			}
+		}
+
+		// Recurse into children
+		flattenNodes(n.Children, out)
+	}
+}
+
+// formatElements formats parsed elements into a compact text list for the LLM.
+func formatElements(pkg string, elements []parsedElement) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("UI Elements (%s, %d elements):\n\n", pkg, len(elements)))
+
+	for i, el := range elements {
+		// [1] Button "Search" @ (650, 95) clickable [id: menu_search]
+		sb.WriteString(fmt.Sprintf("[%d] %s", i+1, el.class))
+
+		// Text label
+		if el.text != "" {
+			sb.WriteString(fmt.Sprintf(" %q", el.text))
+		}
+
+		// Coordinates
+		sb.WriteString(fmt.Sprintf(" @ (%d, %d)", el.centerX, el.centerY))
+
+		// State flags
+		var flags []string
+		if el.clickable {
+			flags = append(flags, "clickable")
+		}
+		if el.focused {
+			flags = append(flags, "focused")
+		}
+		if el.scrollable {
+			flags = append(flags, "scrollable")
+		}
+		if el.selected {
+			flags = append(flags, "selected")
+		}
+		if !el.enabled {
+			flags = append(flags, "disabled")
+		}
+		if len(flags) > 0 {
+			sb.WriteString(" " + strings.Join(flags, " "))
+		}
+
+		// Identifiers
+		var ids []string
+		if el.resourceID != "" {
+			ids = append(ids, "id: "+el.resourceID)
+		}
+		if el.contentDesc != "" {
+			ids = append(ids, "desc: "+el.contentDesc)
+		}
+		if len(ids) > 0 {
+			sb.WriteString(" [" + strings.Join(ids, ", ") + "]")
+		}
+
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\nTo tap an element, use screen_tap with the coordinates shown.")
+	return sb.String()
+}
+
+// uiElementsDump runs uiautomator dump via ADB and returns a parsed element list.
+func uiElementsDump(ctx context.Context) *ToolResult {
+	// 4-second timeout for uiautomator dump
+	dumpCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	// Use exec-out to get XML directly to stdout (avoids filesystem write on device)
+	fullArgs := []string{"-s", adbSerial(), "exec-out", "uiautomator", "dump", "/dev/tty"}
+	cmd := exec.CommandContext(dumpCtx, "adb", fullArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if dumpCtx.Err() == context.DeadlineExceeded {
+			return ErrorResult("ui_elements timed out (4s) — this screen may contain WebViews, games, or animations that block UI dumping. Use screenshot instead.")
+		}
+		return ErrorResult(fmt.Sprintf("Failed to dump UI hierarchy: %v", err))
+	}
+
+	raw := string(out)
+
+	// Strip the trailing status line: "UI hierchary dumped to: /dev/tty"
+	if idx := strings.LastIndex(raw, "UI hierchary"); idx >= 0 {
+		raw = raw[:idx]
+	} else if idx := strings.LastIndex(raw, "UI hierarchy"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	raw = strings.TrimSpace(raw)
+
+	if raw == "" || !strings.HasPrefix(raw, "<?xml") {
+		return ErrorResult("ui_elements returned empty or invalid XML. The current screen may not support UI dumping. Use screenshot instead.")
+	}
+
+	// Parse XML
+	var hierarchy uiHierarchy
+	if err := xml.Unmarshal([]byte(raw), &hierarchy); err != nil {
+		return ErrorResult(fmt.Sprintf("Failed to parse UI hierarchy XML: %v", err))
+	}
+
+	// Flatten into actionable elements
+	var elements []parsedElement
+	flattenNodes(hierarchy.Nodes, &elements)
+
+	if len(elements) == 0 {
+		return NewToolResult("No actionable UI elements found on screen. The app may use a custom rendering engine (game, Flutter, WebView). Use screenshot instead.")
+	}
+
+	// Sort by priority (most interactive first), then by Y coordinate (top to bottom)
+	sort.SliceStable(elements, func(i, j int) bool {
+		if elements[i].priority != elements[j].priority {
+			return elements[i].priority > elements[j].priority
+		}
+		return elements[i].centerY < elements[j].centerY
+	})
+
+	// Cap at 50 elements
+	if len(elements) > 50 {
+		elements = elements[:50]
+	}
+
+	// Detect package from root node
+	pkg := "unknown"
+	if len(hierarchy.Nodes) > 0 {
+		pkg = hierarchy.Nodes[0].Package
+	}
+
+	return NewToolResult(formatElements(pkg, elements))
+}
 
 // adbSerial is the ADB device serial to target. Defaults to localhost:5555
 // (loopback ADB) but can be overridden via ANDROID_SERIAL env var.
