@@ -8,7 +8,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -48,6 +47,7 @@ type AgentLoop struct {
 	tools          *tools.ToolRegistry
 	usageStore     *usage.Store
 	config         *config.Config
+	executor       *LLMExecutor // Extracted LLM iteration loop
 	running        atomic.Bool
 	summarizing    sync.Map // Tracks which sessions are currently being summarized
 	activeCancel   sync.Map // sessionKey -> context.CancelFunc for in-flight requests
@@ -188,8 +188,11 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	// Create context builder and set tools registry
 	contextBuilder := NewContextBuilder(workspace)
 	contextBuilder.SetToolsRegistry(toolsRegistry)
+	contextBuilder.SetToolSearchEnabled(cfg.Tools.Search.Enabled)
 
-	return &AgentLoop{
+	usageStore := usage.NewStore(filepath.Join(workspace, "usage"))
+
+	al := &AgentLoop{
 		bus:            msgBus,
 		provider:       provider,
 		workspace:      workspace,
@@ -201,10 +204,45 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		failoverMgr:    failoverManager,
 		contextBuilder: contextBuilder,
 		tools:          toolsRegistry,
-		usageStore:     usage.NewStore(filepath.Join(workspace, "usage")),
+		usageStore:     usageStore,
 		config:         cfg,
 		summarizing:    sync.Map{},
 	}
+
+	// Build the active tool set if tool search is enabled
+	var activeToolSet *tools.ActiveToolSet
+	if cfg.Tools.Search.Enabled {
+		coreNames := cfg.Tools.Search.CoreTools
+		if len(coreNames) == 0 {
+			coreNames = []string{"read_file", "write_file", "list_dir", "edit_file", "exec", "message"}
+		}
+		activeToolSet = tools.NewActiveToolSet(toolsRegistry, coreNames)
+		toolsRegistry.Register(tools.NewToolSearchTool(activeToolSet))
+		logger.InfoCF("agent", "Tool search enabled",
+			map[string]interface{}{
+				"core_tools":     len(coreNames) + 1, // +1 for tool_search itself
+				"total_tools":    toolsRegistry.Count(),
+				"deferred_tools": toolsRegistry.Count() - len(coreNames) - 1,
+			})
+	}
+
+	// Build the extracted LLM executor with adapter-based dependencies
+	al.executor = &LLMExecutor{
+		provider:      provider,
+		model:         cfg.Agents.Defaults.Model,
+		maxIterations: cfg.Agents.Defaults.MaxToolIterations,
+		tools:         toolsRegistry,
+		activeToolSet: activeToolSet,
+		failover:      failoverManager,
+		usage:         &usageRecorderAdapter{store: usageStore},
+		sessions:      &sessionRecorderAdapter{sessions: sessionsManager},
+		publisher:     msgBus,
+		planner:       &plannerAdapter{al: al},
+		workspace:     workspace,
+		notifySwitch:  al.notifyFailoverSwitch,
+	}
+
+	return al
 }
 
 func (al *AgentLoop) Run(ctx context.Context) error {
@@ -765,354 +803,10 @@ func isPathWithin(path, dir string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
-// runLLMIteration executes the LLM call loop with tool handling.
-// Returns the final content, iteration count, and any error.
+// runLLMIteration delegates to the extracted LLMExecutor.
 func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.Message, opts processOptions) (string, int, error) {
-	iteration := 0
-	var finalContent string
-	planState := newExecutionPlanState()
-
-	for iteration < al.maxIterations {
-		iteration++
-
-		logger.DebugCF("agent", "LLM iteration",
-			map[string]interface{}{
-				"iteration": iteration,
-				"max":       al.maxIterations,
-			})
-
-		// Build tool definitions
-		providerToolDefs := al.tools.ToProviderDefs()
-		activeProvider := al.provider
-		activeModel := al.model
-		switchEpoch := int64(0)
-		if al.failoverMgr != nil && al.failoverMgr.Enabled() {
-			route, routeErr := al.failoverMgr.ResolveRoute()
-			if routeErr != nil {
-				return "", iteration, fmt.Errorf("resolve failover route: %w", routeErr)
-			}
-			activeProvider = route.Provider
-			activeModel = route.Model
-			switchEpoch = route.SwitchEpoch
-		}
-
-		// Log LLM request details
-		logger.DebugCF("agent", "LLM request",
-			map[string]interface{}{
-				"iteration":         iteration,
-				"model":             activeModel,
-				"messages_count":    len(messages),
-				"tools_count":       len(providerToolDefs),
-				"max_tokens":        8192,
-				"temperature":       0.7,
-				"system_prompt_len": len(messages[0].Content),
-			})
-
-		// Log full messages (detailed)
-		logger.DebugCF("agent", "Full LLM request",
-			map[string]interface{}{
-				"iteration":     iteration,
-				"messages_json": formatMessagesForLog(messages),
-				"tools_json":    formatToolsForLog(providerToolDefs),
-			})
-
-		// Call LLM using routed model/provider
-		response, err := activeProvider.Chat(ctx, messages, providerToolDefs, activeModel, map[string]interface{}{
-			"max_tokens":  8192,
-			"temperature": 0.7,
-		})
-
-		if err != nil {
-			var rateLimitErr *providers.RateLimitError
-			if al.failoverMgr != nil && al.failoverMgr.Enabled() && errors.As(err, &rateLimitErr) {
-				switchEvent := al.failoverMgr.OnLLMRateLimited(activeModel, err)
-				logger.WarnCF("agent", "Failover switch evaluation",
-					map[string]interface{}{
-						"iteration":      iteration,
-						"from_model":     switchEvent.FromModel,
-						"to_model":       switchEvent.ToModel,
-						"reason":         switchEvent.Reason,
-						"switched":       switchEvent.Switched,
-						"status_code":    rateLimitErr.StatusCode,
-						"switch_epoch":   switchEpoch,
-						"correlation_id": opts.CorrelationID,
-					})
-
-				if switchEvent.Switched {
-					al.notifyFailoverSwitch(opts.Channel, opts.ChatID, switchEvent)
-					retryRoute, routeErr := al.failoverMgr.ResolveRoute()
-					if routeErr != nil {
-						return "", iteration, fmt.Errorf("resolve failover retry route: %w", routeErr)
-					}
-					activeProvider = retryRoute.Provider
-					activeModel = retryRoute.Model
-					switchEpoch = retryRoute.SwitchEpoch
-
-					response, err = activeProvider.Chat(ctx, messages, providerToolDefs, activeModel, map[string]interface{}{
-						"max_tokens":  8192,
-						"temperature": 0.7,
-					})
-				}
-			}
-
-			if err != nil {
-				logger.ErrorCF("agent", "LLM call failed",
-					map[string]interface{}{
-						"iteration":      iteration,
-						"error":          err.Error(),
-						"model":          activeModel,
-						"switch_epoch":   switchEpoch,
-						"correlation_id": opts.CorrelationID,
-					})
-				return "", iteration, fmt.Errorf("LLM call failed: %w", err)
-			}
-		}
-		if al.failoverMgr != nil && al.failoverMgr.Enabled() {
-			al.failoverMgr.OnLLMSuccess(activeModel)
-		}
-
-		if al.usageStore != nil {
-			usageKnown := response.Usage != nil
-			promptTokens := 0
-			completionTokens := 0
-			totalTokens := 0
-			if usageKnown {
-				promptTokens = response.Usage.PromptTokens
-				completionTokens = response.Usage.CompletionTokens
-				totalTokens = response.Usage.TotalTokens
-			}
-			if totalTokens == 0 {
-				totalTokens = promptTokens + completionTokens
-			}
-			reason := strings.TrimSpace(response.FinishReason)
-			if reason == "" {
-				reason = "normal_call"
-			}
-			al.usageStore.Add(usage.Record{
-				Timestamp:        time.Now().UTC(),
-				SessionKey:       opts.SessionKey,
-				DayKey:           time.Now().UTC().Format("2006-01-02"),
-				Provider:         providerFromModel(activeModel),
-				Model:            activeModel,
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-				TotalTokens:      totalTokens,
-				UsageKnown:       usageKnown,
-				Reason:           reason,
-			})
-		}
-
-		// Check if no tool calls - we're done
-		if len(response.ToolCalls) == 0 {
-			finalContent = response.Content
-			logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
-				map[string]interface{}{
-					"iteration":     iteration,
-					"content_chars": len(finalContent),
-				})
-			break
-		}
-
-		// Log tool calls
-		toolNames := make([]string, 0, len(response.ToolCalls))
-		for _, tc := range response.ToolCalls {
-			toolNames = append(toolNames, tc.Name)
-		}
-		logger.InfoCF("agent", "LLM requested tool calls",
-			map[string]interface{}{
-				"tools":          toolNames,
-				"count":          len(response.ToolCalls),
-				"iteration":      iteration,
-				"correlation_id": opts.CorrelationID,
-			})
-
-		// Plan+execute mode: first tool-call batch becomes explicit user-visible plan.
-		// Persist the plan as a workspace artifact and publish it to chat.
-		if !planState.Announced {
-			planModel := activeModel
-			planState.Bullets, planModel = al.generateExecutionPlanBullets(ctx, opts, activeModel, activeProvider, response.ToolCalls)
-			planState.absorbToolCalls(response.ToolCalls)
-			planState.Announced = true
-
-			planPath, planErr := writeExecutionPlanFile(al.workspace, planState.Bullets, planFileMetadata{
-				SessionKey:    opts.SessionKey,
-				CorrelationID: opts.CorrelationID,
-				Model:         planModel,
-			}, time.Now())
-			if planErr != nil {
-				logger.WarnCF("agent", "Failed to persist execution plan file",
-					map[string]interface{}{
-						"error":          planErr.Error(),
-						"session_key":    opts.SessionKey,
-						"correlation_id": opts.CorrelationID,
-					})
-			} else {
-				logger.InfoCF("agent", "Execution plan file created",
-					map[string]interface{}{
-						"path":           planPath,
-						"bullets":        len(planState.Bullets),
-						"session_key":    opts.SessionKey,
-						"correlation_id": opts.CorrelationID,
-					})
-			}
-
-			planMsg := formatExecutionPlanProgressWithArtifact(planState.Bullets, planPath)
-			if shouldPublishProgress(opts) {
-				// Send the plan as a regular message so it remains persistent in chat.
-				// Telegram channel logic will finalize the current placeholder for this message.
-				al.bus.PublishOutbound(bus.OutboundMessage{
-					Channel:          opts.Channel,
-					ChatID:           opts.ChatID,
-					Content:          planMsg,
-					IsProgressUpdate: false,
-				})
-				// Immediately start a second message dedicated to streaming progress updates.
-				al.bus.PublishOutbound(bus.OutboundMessage{
-					Channel:          opts.Channel,
-					ChatID:           opts.ChatID,
-					Content:          "Working... 🔧",
-					IsProgressUpdate: true,
-				})
-			}
-
-			// Keep the plan in context as a soft execution guardrail for subsequent model turns.
-			messages = append(messages, providers.Message{
-				Role:    "system",
-				Content: formatPlanContextMessage(planState.Bullets),
-			})
-		}
-
-		// Build assistant message with tool calls
-		assistantMsg := providers.Message{
-			Role:    "assistant",
-			Content: response.Content,
-		}
-		for _, tc := range response.ToolCalls {
-			argumentsJSON, _ := json.Marshal(tc.Arguments)
-			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, providers.ToolCall{
-				ID:   tc.ID,
-				Type: "function",
-				Function: &providers.FunctionCall{
-					Name:      tc.Name,
-					Arguments: string(argumentsJSON),
-				},
-			})
-		}
-		messages = append(messages, assistantMsg)
-
-		// Save assistant message with tool calls to session
-		al.sessions.AddFullMessage(opts.SessionKey, assistantMsg)
-
-		// Execute tool calls
-		for _, tc := range response.ToolCalls {
-			// If model introduces out-of-plan tool families, announce and persist plan update first.
-			tcName := strings.TrimSpace(tc.Name)
-			if tcName == "" && tc.Function != nil {
-				tcName = strings.TrimSpace(tc.Function.Name)
-			}
-			if planState.Announced && tcName != "" && !planState.isAllowedTool(tcName) {
-				updateStep := summarizeToolCallForPlan(tc)
-				planState.Bullets = append(planState.Bullets, updateStep)
-				planState.Allowed[tcName] = struct{}{}
-
-				updateMsg := formatPlanUpdateProgress(updateStep)
-				if shouldPublishProgress(opts) {
-					al.bus.PublishOutbound(bus.OutboundMessage{
-						Channel:          opts.Channel,
-						ChatID:           opts.ChatID,
-						Content:          updateMsg,
-						IsProgressUpdate: true,
-					})
-				}
-
-				messages = append(messages, providers.Message{
-					Role:    "system",
-					Content: formatPlanContextMessage(planState.Bullets),
-				})
-
-			}
-
-			// Log tool call with arguments preview
-			argsJSON, _ := json.Marshal(tc.Arguments)
-			argsPreview := utils.Truncate(string(argsJSON), 200)
-			logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
-				map[string]interface{}{
-					"tool":           tc.Name,
-					"iteration":      iteration,
-					"correlation_id": opts.CorrelationID,
-				})
-
-			// Track action start if visibility enabled
-			var actionID string
-			if opts.ActionStream != nil {
-				actionID = opts.ActionStream.StartAction(tc.Name, tc.Arguments)
-			}
-
-			// Create async callback for tools that implement AsyncTool
-			// NOTE: Following openclaw's design, async tools do NOT send results directly to users.
-			// Instead, they notify the agent via PublishInbound, and the agent decides
-			// whether to forward the result to the user (in processSystemMessage).
-			asyncCallback := func(callbackCtx context.Context, result *tools.ToolResult) {
-				// Log the async completion but don't send directly to user
-				// The agent will handle user notification via processSystemMessage
-				if !result.Silent && result.ForUser != "" {
-					logger.InfoCF("agent", "Async tool completed, agent will handle notification",
-						map[string]interface{}{
-							"tool":        tc.Name,
-							"content_len": len(result.ForUser),
-						})
-				}
-			}
-
-			toolResult := al.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, opts.Channel, opts.ChatID, asyncCallback)
-
-			// Track action completion if visibility enabled
-			if opts.ActionStream != nil && actionID != "" {
-				resultContent := toolResult.ForUser
-				if resultContent == "" {
-					resultContent = toolResult.ForLLM
-				}
-				opts.ActionStream.CompleteAction(actionID, resultContent, toolResult.Err)
-			}
-
-			// Send ForUser content to user immediately if not Silent
-			if !toolResult.Silent && toolResult.ForUser != "" && opts.SendResponse {
-				al.bus.PublishOutbound(bus.OutboundMessage{
-					Channel: opts.Channel,
-					ChatID:  opts.ChatID,
-					Content: toolResult.ForUser,
-				})
-				logger.DebugCF("agent", "Sent tool result to user",
-					map[string]interface{}{
-						"tool":        tc.Name,
-						"content_len": len(toolResult.ForUser),
-					})
-			}
-
-			// Determine content for LLM based on tool result
-			contentForLLM := toolResult.ForLLM
-			if contentForLLM == "" && toolResult.Err != nil {
-				contentForLLM = toolResult.Err.Error()
-			}
-
-			toolResultMsg := providers.Message{
-				Role:       "tool",
-				Content:    contentForLLM,
-				ToolCallID: tc.ID,
-			}
-			messages = append(messages, toolResultMsg)
-
-			// Save tool result message to session
-			al.sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
-		}
-	}
-
-	// Force final update if visibility enabled
-	if opts.ActionStream != nil {
-		opts.ActionStream.ForceUpdate()
-	}
-
-	return finalContent, iteration, nil
+	result := al.executor.Run(ctx, messages, opts)
+	return result.FinalContent, result.Iterations, result.Err
 }
 
 func shouldPublishProgress(opts processOptions) bool {

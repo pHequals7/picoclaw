@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/usage"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -94,31 +92,8 @@ func (al *AgentLoop) generateExecutionPlanBullets(ctx context.Context, opts proc
 		return fallback, activeModel
 	}
 
-	if al.usageStore != nil {
-		usageKnown := response.Usage != nil
-		promptTokens := 0
-		completionTokens := 0
-		totalTokens := 0
-		if usageKnown {
-			promptTokens = response.Usage.PromptTokens
-			completionTokens = response.Usage.CompletionTokens
-			totalTokens = response.Usage.TotalTokens
-		}
-		if totalTokens == 0 {
-			totalTokens = promptTokens + completionTokens
-		}
-		al.usageStore.Add(usage.Record{
-			Timestamp:        time.Now().UTC(),
-			SessionKey:       opts.SessionKey,
-			DayKey:           time.Now().UTC().Format("2006-01-02"),
-			Provider:         providerFromModel(plannerModel),
-			Model:            plannerModel,
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      totalTokens,
-			UsageKnown:       usageKnown,
-			Reason:           "planner_call",
-		})
+	if al.executor != nil && al.executor.usage != nil {
+		al.executor.usage.Record(opts.SessionKey, plannerModel, "planner_call", response)
 	}
 
 	parsed := parseExecutionPlanBullets(response.Content)

@@ -144,6 +144,37 @@ func (r *ToolRegistry) ToProviderDefs() []providers.ToolDefinition {
 	return definitions
 }
 
+// ToProviderDefsFiltered returns provider definitions only for the named tools.
+func (r *ToolRegistry) ToProviderDefsFiltered(names map[string]struct{}) []providers.ToolDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	definitions := make([]providers.ToolDefinition, 0, len(names))
+	for _, tool := range r.tools {
+		if _, ok := names[tool.Name()]; !ok {
+			continue
+		}
+		schema := ToolToSchema(tool)
+		fn, ok := schema["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		desc, _ := fn["description"].(string)
+		params, _ := fn["parameters"].(map[string]interface{})
+
+		definitions = append(definitions, providers.ToolDefinition{
+			Type: "function",
+			Function: providers.ToolFunctionDefinition{
+				Name:        name,
+				Description: desc,
+				Parameters:  params,
+			},
+		})
+	}
+	return definitions
+}
+
 // List returns a list of all registered tool names.
 func (r *ToolRegistry) List() []string {
 	r.mu.RLock()

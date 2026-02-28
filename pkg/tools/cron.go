@@ -165,19 +165,20 @@ func (t *CronTool) addJob(args map[string]interface{}) *ToolResult {
 		return ErrorResult("one of at_seconds, every_seconds, or cron_expr is required")
 	}
 
-	// Read deliver parameter, default to true
+	// Determine job type from args
+	command, _ := args["command"].(string)
 	deliver := true
 	if d, ok := args["deliver"].(bool); ok {
 		deliver = d
 	}
 
-	command, _ := args["command"].(string)
+	var jobType cron.JobType
 	if command != "" {
-		// Commands must be processed by agent/exec tool, so deliver must be false (or handled specifically)
-		// Actually, let's keep deliver=false to let the system know it's not a simple chat message
-		// But for our new logic in ExecuteJob, we can handle it regardless of deliver flag if Payload.Command is set.
-		// However, logically, it's not "delivered" to chat directly as is.
-		deliver = false
+		jobType = cron.JobTypeCommand
+	} else if deliver {
+		jobType = cron.JobTypeDeliver
+	} else {
+		jobType = cron.JobTypeAgent
 	}
 
 	// Truncate message for job name (max 30 chars)
@@ -187,7 +188,7 @@ func (t *CronTool) addJob(args map[string]interface{}) *ToolResult {
 		messagePreview,
 		schedule,
 		message,
-		deliver,
+		jobType,
 		channel,
 		chatID,
 	)
@@ -197,7 +198,6 @@ func (t *CronTool) addJob(args map[string]interface{}) *ToolResult {
 
 	if command != "" {
 		job.Payload.Command = command
-		// Need to save the updated payload
 		t.cronService.UpdateJob(job)
 	}
 
@@ -259,69 +259,72 @@ func (t *CronTool) enableJob(args map[string]interface{}, enable bool) *ToolResu
 	return SilentResult(fmt.Sprintf("Cron job '%s' %s", job.Name, status))
 }
 
-// ExecuteJob executes a cron job through the agent
+// ExecuteJob executes a cron job through the agent.
 func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
-	// Get channel/chatID from job payload
+	channel, chatID := t.resolveTarget(job)
+
+	switch job.Payload.Kind {
+	case cron.JobTypeCommand:
+		return t.executeCommand(ctx, job, channel, chatID)
+	case cron.JobTypeDeliver:
+		return t.executeDeliver(job, channel, chatID)
+	case cron.JobTypeAgent:
+		return t.executeAgent(ctx, job, channel, chatID)
+	default:
+		return fmt.Sprintf("Error: unknown job type %q", job.Payload.Kind)
+	}
+}
+
+func (t *CronTool) resolveTarget(job *cron.CronJob) (string, string) {
 	channel := job.Payload.Channel
 	chatID := job.Payload.To
-
-	// Default values if not set
 	if channel == "" {
 		channel = "cli"
 	}
 	if chatID == "" {
 		chatID = "direct"
 	}
+	return channel, chatID
+}
 
-	// Execute command if present
-	if job.Payload.Command != "" {
-		args := map[string]interface{}{
-			"command": job.Payload.Command,
-		}
-
-		result := t.execTool.Execute(ctx, args)
-		var output string
-		if result.IsError {
-			output = fmt.Sprintf("Error executing scheduled command: %s", result.ForLLM)
-		} else {
-			output = fmt.Sprintf("Scheduled command '%s' executed:\n%s", job.Payload.Command, result.ForLLM)
-		}
-
-		t.msgBus.PublishOutbound(bus.OutboundMessage{
-			Channel: channel,
-			ChatID:  chatID,
-			Content: output,
-		})
-		return "ok"
+func (t *CronTool) executeCommand(ctx context.Context, job *cron.CronJob, channel, chatID string) string {
+	result := t.execTool.Execute(ctx, map[string]interface{}{
+		"command": job.Payload.Command,
+	})
+	var output string
+	if result.IsError {
+		output = fmt.Sprintf("Error executing scheduled command: %s", result.ForLLM)
+	} else {
+		output = fmt.Sprintf("Scheduled command '%s' executed:\n%s", job.Payload.Command, result.ForLLM)
 	}
+	t.msgBus.PublishOutbound(bus.OutboundMessage{
+		Channel: channel,
+		ChatID:  chatID,
+		Content: output,
+	})
+	return "ok"
+}
 
-	// If deliver=true, send message directly without agent processing
-	if job.Payload.Deliver {
-		t.msgBus.PublishOutbound(bus.OutboundMessage{
-			Channel: channel,
-			ChatID:  chatID,
-			Content: job.Payload.Message,
-		})
-		return "ok"
-	}
+func (t *CronTool) executeDeliver(job *cron.CronJob, channel, chatID string) string {
+	t.msgBus.PublishOutbound(bus.OutboundMessage{
+		Channel: channel,
+		ChatID:  chatID,
+		Content: job.Payload.Message,
+	})
+	return "ok"
+}
 
-	// For deliver=false, process through agent (for complex tasks)
+func (t *CronTool) executeAgent(ctx context.Context, job *cron.CronJob, channel, chatID string) string {
 	sessionKey := fmt.Sprintf("cron-%s", job.ID)
-
-	// Call agent with job's message
-	response, err := t.executor.ProcessDirectWithChannel(
+	_, err := t.executor.ProcessDirectWithChannel(
 		ctx,
 		job.Payload.Message,
 		sessionKey,
 		channel,
 		chatID,
 	)
-
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err)
 	}
-
-	// Response is automatically sent via MessageBus by AgentLoop
-	_ = response // Will be sent by AgentLoop
 	return "ok"
 }

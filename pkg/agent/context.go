@@ -16,10 +16,11 @@ import (
 )
 
 type ContextBuilder struct {
-	workspace    string
-	skillsLoader *skills.SkillsLoader
-	memory       *MemoryStore
-	tools        *tools.ToolRegistry // Direct reference to tool registry
+	workspace       string
+	skillsLoader    *skills.SkillsLoader
+	memory          *MemoryStore
+	tools           *tools.ToolRegistry // Direct reference to tool registry
+	toolSearchHint  bool                // true = append tool_search guidance
 }
 
 func getGlobalConfigDir() string {
@@ -47,6 +48,11 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 // SetToolsRegistry sets the tools registry for dynamic tool summary generation.
 func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
 	cb.tools = registry
+}
+
+// SetToolSearchEnabled enables the tool search hint in the system prompt.
+func (cb *ContextBuilder) SetToolSearchEnabled(enabled bool) {
+	cb.toolSearchHint = enabled
 }
 
 func (cb *ContextBuilder) getIdentity() string {
@@ -104,6 +110,23 @@ func (cb *ContextBuilder) buildToolsSection() string {
 	for _, s := range summaries {
 		sb.WriteString(s)
 		sb.WriteString("\n")
+	}
+
+	if cb.toolSearchHint {
+		sb.WriteString(`
+### Tool Search
+
+**IMPORTANT**: The tools listed above are only your core tools. Many more tools are available but hidden to save context. You MUST use the ` + "`tool_search`" + ` tool to discover them.
+
+**When to use tool_search:**
+- Before ANY task involving: web search, web browsing, scheduling/cron, sending files, voice, spawning sub-agents, or importing attachments
+- Whenever a user asks you to do something and none of your visible tools can handle it
+- NEVER tell the user "I don't have a tool for that" without first searching for one
+
+**How to use it:** Call ` + "`tool_search`" + ` with a short descriptive query like "web search", "schedule cron", "send file", or "voice transcription". The matching tools will become available for you to call immediately.
+
+**Available categories of hidden tools:** web search & fetch, cron/scheduling, file sending, attachment import, voice transcription, sub-agent spawning, and any connected MCP server tools.
+`)
 	}
 
 	return sb.String()

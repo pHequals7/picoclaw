@@ -94,18 +94,20 @@ func TestLoadMCPTools_CommandTransport(t *testing.T) {
 		t.Fatalf("missing discovered tool mcp_helper_sum; got names=%v", toolNames(tools))
 	}
 
-	gotGreeting, err := greetTool.Execute(context.Background(), map[string]interface{}{"name": "Ada"})
-	if err != nil {
-		t.Fatalf("greetTool.Execute() error: %v", err)
+	greetResult := greetTool.Execute(context.Background(), map[string]interface{}{"name": "Ada"})
+	if greetResult.IsError {
+		t.Fatalf("greetTool.Execute() error: %s", greetResult.ForLLM)
 	}
+	gotGreeting := greetResult.ForLLM
 	if !strings.Contains(gotGreeting, "Hello Ada") {
 		t.Fatalf("greetTool.Execute() missing greeting: %s", gotGreeting)
 	}
 
-	gotSum, err := sumTool.Execute(context.Background(), map[string]interface{}{"a": 2, "b": 3})
-	if err != nil {
-		t.Fatalf("sumTool.Execute() error: %v", err)
+	sumResult := sumTool.Execute(context.Background(), map[string]interface{}{"a": 2, "b": 3})
+	if sumResult.IsError {
+		t.Fatalf("sumTool.Execute() error: %s", sumResult.ForLLM)
 	}
+	gotSum := sumResult.ForLLM
 	if !strings.Contains(gotSum, `"sum": 5`) {
 		t.Fatalf("sumTool.Execute() output missing sum result: %s", gotSum)
 	}

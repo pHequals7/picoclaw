@@ -49,20 +49,20 @@ func TestMCPExternalPopularFilesystemCommand(t *testing.T) {
 	listAllowedDirs := requireToolByName(t, tools, "mcp_fs_list_allowed_directories")
 	readFile := requireToolByName(t, tools, "mcp_fs_read_file")
 
-	out, err := listAllowedDirs.Execute(ctx, map[string]interface{}{})
-	if err != nil {
-		t.Fatalf("Execute(list_allowed_directories) error: %v", err)
+	listResult := listAllowedDirs.Execute(ctx, map[string]interface{}{})
+	if listResult.IsError {
+		t.Fatalf("Execute(list_allowed_directories) error: %s", listResult.ForLLM)
 	}
-	if !strings.Contains(out, rootCanonical) {
-		t.Fatalf("expected allowed directory %q in output: %s", rootCanonical, out)
+	if !strings.Contains(listResult.ForLLM, rootCanonical) {
+		t.Fatalf("expected allowed directory %q in output: %s", rootCanonical, listResult.ForLLM)
 	}
 
-	readOut, err := readFile.Execute(ctx, map[string]interface{}{"path": testFile})
-	if err != nil {
-		t.Fatalf("Execute(read_file) error: %v", err)
+	readResult := readFile.Execute(ctx, map[string]interface{}{"path": testFile})
+	if readResult.IsError {
+		t.Fatalf("Execute(read_file) error: %s", readResult.ForLLM)
 	}
-	if !strings.Contains(readOut, "hello from filesystem mcp") {
-		t.Fatalf("expected file content in output, got: %s", readOut)
+	if !strings.Contains(readResult.ForLLM, "hello from filesystem mcp") {
+		t.Fatalf("expected file content in output, got: %s", readResult.ForLLM)
 	}
 }
 
@@ -87,12 +87,12 @@ func TestMCPExternalPopularMemoryCommand(t *testing.T) {
 
 	readGraph := requireToolByName(t, tools, "mcp_memory_read_graph")
 
-	out, err := readGraph.Execute(ctx, map[string]interface{}{})
-	if err != nil {
-		t.Fatalf("Execute(read_graph) error: %v", err)
+	graphResult := readGraph.Execute(ctx, map[string]interface{}{})
+	if graphResult.IsError {
+		t.Fatalf("Execute(read_graph) error: %s", graphResult.ForLLM)
 	}
-	if !strings.Contains(strings.ToLower(out), "entities") {
-		t.Fatalf("expected graph output to include entities: %s", out)
+	if !strings.Contains(strings.ToLower(graphResult.ForLLM), "entities") {
+		t.Fatalf("expected graph output to include entities: %s", graphResult.ForLLM)
 	}
 }
 
@@ -118,12 +118,12 @@ func TestMCPExternalPopularEverythingSSE(t *testing.T) {
 
 	echoTool := requireToolByName(t, tools, "mcp_every_echo")
 
-	out, err := echoTool.Execute(ctx, map[string]interface{}{"message": "hello from sse"})
-	if err != nil {
-		t.Fatalf("Execute(echo) error: %v", err)
+	sseResult := echoTool.Execute(ctx, map[string]interface{}{"message": "hello from sse"})
+	if sseResult.IsError {
+		t.Fatalf("Execute(echo) error: %s", sseResult.ForLLM)
 	}
-	if !strings.Contains(out, "hello from sse") {
-		t.Fatalf("unexpected echo output: %s", out)
+	if !strings.Contains(sseResult.ForLLM, "hello from sse") {
+		t.Fatalf("unexpected echo output: %s", sseResult.ForLLM)
 	}
 }
 
@@ -149,12 +149,12 @@ func TestMCPExternalPopularEverythingStreamableHTTP(t *testing.T) {
 
 	echoTool := requireToolByName(t, tools, "mcp_http_echo")
 
-	out, err := echoTool.Execute(ctx, map[string]interface{}{"message": "hello from streamable-http"})
-	if err != nil {
-		t.Fatalf("Execute(echo) error: %v", err)
+	httpResult := echoTool.Execute(ctx, map[string]interface{}{"message": "hello from streamable-http"})
+	if httpResult.IsError {
+		t.Fatalf("Execute(echo) error: %s", httpResult.ForLLM)
 	}
-	if !strings.Contains(out, "hello from streamable-http") {
-		t.Fatalf("unexpected echo output: %s", out)
+	if !strings.Contains(httpResult.ForLLM, "hello from streamable-http") {
+		t.Fatalf("unexpected echo output: %s", httpResult.ForLLM)
 	}
 }
 

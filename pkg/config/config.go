@@ -271,9 +271,15 @@ type MCPToolsConfig struct {
 	Servers []MCPServerConfig `json:"servers"`
 }
 
+type ToolSearchConfig struct {
+	Enabled   bool     `json:"enabled"`
+	CoreTools []string `json:"core_tools,omitempty"`
+}
+
 type ToolsConfig struct {
-	Web WebToolsConfig `json:"web"`
-	MCP MCPToolsConfig `json:"mcp"`
+	Web    WebToolsConfig   `json:"web"`
+	MCP    MCPToolsConfig   `json:"mcp"`
+	Search ToolSearchConfig `json:"search"`
 }
 
 func DefaultConfig() *Config {

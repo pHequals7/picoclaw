@@ -22,13 +22,24 @@ type CronSchedule struct {
 	TZ      string `json:"tz,omitempty"`
 }
 
+// JobType defines how a cron job should be executed.
+type JobType string
+
+const (
+	// JobTypeCommand executes a shell command and sends output to channel.
+	JobTypeCommand JobType = "command"
+	// JobTypeDeliver sends a message directly to the channel without agent processing.
+	JobTypeDeliver JobType = "deliver"
+	// JobTypeAgent processes the message through the agent loop (for complex tasks).
+	JobTypeAgent JobType = "agent"
+)
+
 type CronPayload struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
-	Command string `json:"command,omitempty"`
-	Deliver bool   `json:"deliver"`
-	Channel string `json:"channel,omitempty"`
-	To      string `json:"to,omitempty"`
+	Kind    JobType `json:"kind"`
+	Message string  `json:"message"`
+	Command string  `json:"command,omitempty"`
+	Channel string  `json:"channel,omitempty"`
+	To      string  `json:"to,omitempty"`
 }
 
 type CronJobState struct {
@@ -326,7 +337,123 @@ func (cs *CronService) loadStore() error {
 		return err
 	}
 
-	return json.Unmarshal(data, cs.store)
+	// Migrate legacy jobs at the raw JSON level to handle the removed "deliver" field
+	migratedData, didMigrate := MigrateLegacyPayloads(data)
+	if err := json.Unmarshal(migratedData, cs.store); err != nil {
+		return err
+	}
+
+	// Also migrate any remaining jobs that weren't caught by raw JSON migration
+	if cs.migrateJobTypes() {
+		didMigrate = true
+	}
+
+	if didMigrate {
+		_ = cs.saveStoreUnsafe()
+	}
+
+	return nil
+}
+
+// migrateJobTypes converts legacy "agent_turn" jobs to explicit JobType values.
+// Returns true if any jobs were migrated.
+func (cs *CronService) migrateJobTypes() bool {
+	migrated := false
+
+	// We need to read the raw JSON to check for the legacy "deliver" field
+	// since it's been removed from the struct. Instead, infer from the Kind field.
+	for i := range cs.store.Jobs {
+		job := &cs.store.Jobs[i]
+		switch job.Payload.Kind {
+		case JobTypeCommand, JobTypeDeliver, JobTypeAgent:
+			// Already migrated
+			continue
+		default:
+			// Legacy job (kind = "agent_turn" or other unknown values)
+			if job.Payload.Command != "" {
+				job.Payload.Kind = JobTypeCommand
+			} else {
+				// Default legacy jobs to agent processing
+				job.Payload.Kind = JobTypeAgent
+			}
+			migrated = true
+		}
+	}
+	return migrated
+}
+
+// MigrateLegacyPayloads migrates old-format jobs using raw JSON to detect the
+// removed "deliver" field. Call this on raw JSON data before unmarshaling.
+func MigrateLegacyPayloads(data []byte) ([]byte, bool) {
+	var raw struct {
+		Version int `json:"version"`
+		Jobs    []struct {
+			ID             string          `json:"id"`
+			Name           string          `json:"name"`
+			Enabled        bool            `json:"enabled"`
+			Schedule       json.RawMessage `json:"schedule"`
+			Payload        json.RawMessage `json:"payload"`
+			State          json.RawMessage `json:"state"`
+			CreatedAtMS    int64           `json:"createdAtMs"`
+			UpdatedAtMS    int64           `json:"updatedAtMs"`
+			DeleteAfterRun bool            `json:"deleteAfterRun"`
+		} `json:"jobs"`
+	}
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return data, false
+	}
+
+	migrated := false
+	for i := range raw.Jobs {
+		var payload struct {
+			Kind    string `json:"kind"`
+			Deliver bool   `json:"deliver"`
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(raw.Jobs[i].Payload, &payload); err != nil {
+			continue
+		}
+
+		needsMigration := payload.Kind == "agent_turn" || payload.Kind == ""
+		if !needsMigration {
+			continue
+		}
+
+		var newKind JobType
+		if payload.Command != "" {
+			newKind = JobTypeCommand
+		} else if payload.Deliver {
+			newKind = JobTypeDeliver
+		} else {
+			newKind = JobTypeAgent
+		}
+
+		// Re-serialize payload with new kind and without deliver field
+		var fullPayload map[string]interface{}
+		if err := json.Unmarshal(raw.Jobs[i].Payload, &fullPayload); err != nil {
+			continue
+		}
+		fullPayload["kind"] = string(newKind)
+		delete(fullPayload, "deliver")
+
+		newPayloadData, err := json.Marshal(fullPayload)
+		if err != nil {
+			continue
+		}
+		raw.Jobs[i].Payload = newPayloadData
+		migrated = true
+	}
+
+	if !migrated {
+		return data, false
+	}
+
+	newData, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return data, false
+	}
+	return newData, true
 }
 
 func (cs *CronService) saveStoreUnsafe() error {
@@ -343,7 +470,7 @@ func (cs *CronService) saveStoreUnsafe() error {
 	return os.WriteFile(cs.storePath, data, 0644)
 }
 
-func (cs *CronService) AddJob(name string, schedule CronSchedule, message string, deliver bool, channel, to string) (*CronJob, error) {
+func (cs *CronService) AddJob(name string, schedule CronSchedule, message string, jobType JobType, channel, to string) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -358,9 +485,8 @@ func (cs *CronService) AddJob(name string, schedule CronSchedule, message string
 		Enabled:  true,
 		Schedule: schedule,
 		Payload: CronPayload{
-			Kind:    "agent_turn",
+			Kind:    jobType,
 			Message: message,
-			Deliver: deliver,
 			Channel: channel,
 			To:      to,
 		},
