@@ -175,11 +175,12 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	// Wire pipeline-based executor factory for subagents (replaces RunToolLoop)
 	subagentManager.SetExecutorFactory(func(toolReg *tools.ToolRegistry, model string) tools.SubagentExecutor {
 		return &LLMExecutor{
-			provider:      provider,
-			model:         model,
-			maxIterations: cfg.Agents.Defaults.MaxToolIterations,
-			tools:         toolReg,
-			parallelTools: cfg.Agents.Defaults.ParallelToolExecution,
+			provider:           provider,
+			model:              model,
+			maxIterations:      cfg.Agents.Defaults.MaxToolIterations,
+			tools:              toolReg,
+			parallelTools:      cfg.Agents.Defaults.ParallelToolExecution,
+			maxToolResultChars: cfg.Agents.Defaults.MaxToolResultChars,
 		}
 	})
 
@@ -257,10 +258,11 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		publisher:     msgBus,
 		planner:       &plannerAdapter{al: al},
 		workspace:     workspace,
-		parallelTools: cfg.Agents.Defaults.ParallelToolExecution,
-		mediaStore:    mediaStore,
-		maxMediaSize:  maxMediaSize,
-		notifySwitch:  al.notifyFailoverSwitch,
+		parallelTools:      cfg.Agents.Defaults.ParallelToolExecution,
+		maxToolResultChars: cfg.Agents.Defaults.MaxToolResultChars,
+		mediaStore:         mediaStore,
+		maxMediaSize:       maxMediaSize,
+		notifySwitch:       al.notifyFailoverSwitch,
 	}
 
 	// Build agent registry
@@ -305,14 +307,15 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		instMediaStore := media.NewFileMediaStore()
 
 		instExecutor := &LLMExecutor{
-			provider:      provider,
-			model:         instModel,
-			maxIterations: instMaxIter,
-			tools:         instTools,
-			parallelTools: cfg.Agents.Defaults.ParallelToolExecution,
-			mediaStore:    instMediaStore,
-			maxMediaSize:  maxMediaSize,
-			workspace:     instWorkspace,
+			provider:           provider,
+			model:              instModel,
+			maxIterations:      instMaxIter,
+			tools:              instTools,
+			parallelTools:      cfg.Agents.Defaults.ParallelToolExecution,
+			maxToolResultChars: cfg.Agents.Defaults.MaxToolResultChars,
+			mediaStore:         instMediaStore,
+			maxMediaSize:       maxMediaSize,
+			workspace:          instWorkspace,
 		}
 
 		inst := &AgentInstance{
@@ -818,7 +821,16 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 	var history []providers.Message
 	var summary string
 	if !opts.NoHistory {
-		history = al.sessions.GetHistory(opts.SessionKey)
+		budgetPct := al.config.Agents.Defaults.HistoryTokenBudgetPct
+		if budgetPct <= 0 {
+			budgetPct = 40
+		}
+		historyBudget := al.contextWindow * budgetPct / 100
+		if historyBudget > 0 {
+			history = al.sessions.GetHistoryWithBudget(opts.SessionKey, historyBudget)
+		} else {
+			history = al.sessions.GetHistory(opts.SessionKey)
+		}
 		summary = al.sessions.GetSummary(opts.SessionKey)
 	}
 	messages := al.contextBuilder.BuildMessages(
@@ -1071,9 +1083,19 @@ func (al *AgentLoop) updateToolContexts(channel, chatID string) {
 func (al *AgentLoop) maybeSummarize(sessionKey string) {
 	newHistory := al.sessions.GetHistory(sessionKey)
 	tokenEstimate := al.estimateTokens(newHistory)
-	threshold := al.contextWindow * 75 / 100
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
+	thresholdPct := al.config.Agents.Defaults.SummarizeThresholdPct
+	if thresholdPct <= 0 {
+		thresholdPct = 30
+	}
+	threshold := al.contextWindow * thresholdPct / 100
+
+	msgCount := al.config.Agents.Defaults.SummarizeMessageCount
+	if msgCount <= 0 {
+		msgCount = 10
+	}
+
+	if len(newHistory) > msgCount || tokenEstimate > threshold {
 		if _, loading := al.summarizing.LoadOrStore(sessionKey, true); !loading {
 			go func() {
 				defer al.summarizing.Delete(sessionKey)

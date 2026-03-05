@@ -310,10 +310,11 @@ type toolCallResult struct {
 // ExecuteToolsStage executes tool calls and appends results to messages.
 // When parallelTools is true, tool calls run concurrently via goroutines.
 type ExecuteToolsStage struct {
-	tools         *tools.ToolRegistry
-	sessions      SessionRecorder
-	publisher     *bus.MessageBus
-	parallelTools bool
+	tools              *tools.ToolRegistry
+	sessions           SessionRecorder
+	publisher          *bus.MessageBus
+	parallelTools      bool
+	maxToolResultChars int // max chars to persist in session history (0 = unlimited)
 }
 
 func (s *ExecuteToolsStage) Name() string { return "execute_tools" }
@@ -463,6 +464,7 @@ func (s *ExecuteToolsStage) Execute(sc *StageContext) error {
 			contentForLLM = r.toolResult.Err.Error()
 		}
 
+		// LLM sees full content for current turn
 		toolResultMsg := providers.Message{
 			Role:       "tool",
 			Content:    contentForLLM,
@@ -470,8 +472,19 @@ func (s *ExecuteToolsStage) Execute(sc *StageContext) error {
 		}
 		sc.Messages = append(sc.Messages, toolResultMsg)
 
+		// Session gets truncated content for future turns
 		if s.sessions != nil {
-			s.sessions.AddFullMessage(sc.Opts.SessionKey, toolResultMsg)
+			contentForSession := contentForLLM
+			if s.maxToolResultChars > 0 && len(contentForSession) > s.maxToolResultChars {
+				contentForSession = contentForSession[:s.maxToolResultChars] +
+					fmt.Sprintf("\n...[truncated, %d chars total]", len(contentForLLM))
+			}
+			sessionMsg := providers.Message{
+				Role:       "tool",
+				Content:    contentForSession,
+				ToolCallID: r.tc.ID,
+			}
+			s.sessions.AddFullMessage(sc.Opts.SessionKey, sessionMsg)
 		}
 	}
 
@@ -555,10 +568,11 @@ func (ex *LLMExecutor) buildPipeline() *Pipeline {
 				workspace: ex.workspace,
 			},
 			&ExecuteToolsStage{
-				tools:         ex.tools,
-				sessions:      ex.sessions,
-				publisher:     ex.publisher,
-				parallelTools: ex.parallelTools,
+				tools:              ex.tools,
+				sessions:           ex.sessions,
+				publisher:          ex.publisher,
+				parallelTools:      ex.parallelTools,
+				maxToolResultChars: ex.maxToolResultChars,
 			},
 		},
 	}

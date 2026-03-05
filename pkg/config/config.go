@@ -76,6 +76,10 @@ type AgentDefaults struct {
 	ParallelToolExecution  bool     `json:"parallel_tool_execution" env:"PICOCLAW_AGENTS_DEFAULTS_PARALLEL_TOOL_EXECUTION"`
 	FallbackModel          string   `json:"fallback_model" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODEL"`
 	FallbackModels         []string `json:"fallback_models" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODELS"`
+	MaxToolResultChars     int      `json:"max_tool_result_chars" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_RESULT_CHARS"`
+	HistoryTokenBudgetPct  int      `json:"history_token_budget_pct" env:"PICOCLAW_AGENTS_DEFAULTS_HISTORY_TOKEN_BUDGET_PCT"`
+	SummarizeThresholdPct  int      `json:"summarize_threshold_pct" env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_THRESHOLD_PCT"`
+	SummarizeMessageCount  int      `json:"summarize_message_count" env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_COUNT"`
 }
 
 type MediaConfig struct {
@@ -310,6 +314,10 @@ func DefaultConfig() *Config {
 				Temperature:           0.7,
 				MaxToolIterations:     20,
 				ParallelToolExecution: true,
+				MaxToolResultChars:    2000,
+				HistoryTokenBudgetPct: 40,
+				SummarizeThresholdPct: 30,
+				SummarizeMessageCount: 10,
 			},
 			Media: MediaConfig{
 				MaxMediaSizeMB: 20,

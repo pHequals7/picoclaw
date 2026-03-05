@@ -144,19 +144,24 @@ func (cb *ContextBuilder) BuildSystemPrompt() string {
 		parts = append(parts, bootstrapContent)
 	}
 
-	// Skills - show summary, AI can read full content with read_file tool
-	skillsSummary := cb.skillsLoader.BuildSkillsSummary()
-	if skillsSummary != "" {
-		parts = append(parts, fmt.Sprintf(`# Skills
-
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
-
-%s`, skillsSummary))
+	// Skills - compact name list (agent reads SKILL.md on demand)
+	allSkills := cb.skillsLoader.ListSkills()
+	if len(allSkills) > 0 {
+		var names []string
+		for _, s := range allSkills {
+			names = append(names, s.Name)
+		}
+		parts = append(parts, fmt.Sprintf("# Skills: %s\nUse `read_file` to load any skill's SKILL.md when needed.",
+			strings.Join(names, ", ")))
 	}
 
-	// Memory context
+	// Memory context — brief excerpt (agent can read_file for full content)
 	memoryContext := cb.memory.GetMemoryContext()
 	if memoryContext != "" {
+		const maxMemoryChars = 500
+		if len(memoryContext) > maxMemoryChars {
+			memoryContext = memoryContext[:maxMemoryChars] + "\n...[use read_file for full memory]"
+		}
 		parts = append(parts, "# Memory\n\n"+memoryContext)
 	}
 
@@ -165,19 +170,32 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 }
 
 func (cb *ContextBuilder) LoadBootstrapFiles() string {
-	bootstrapFiles := []string{
-		"AGENTS.md",
-		"SOUL.md",
-		"USER.md",
-		"IDENTITY.md",
+	// Always load SOUL.md inline (tiny, defines personality)
+	var result string
+	soulPath := filepath.Join(cb.workspace, "SOUL.md")
+	if data, err := os.ReadFile(soulPath); err == nil {
+		result += fmt.Sprintf("## SOUL.md\n\n%s\n\n", string(data))
 	}
 
-	var result string
-	for _, filename := range bootstrapFiles {
-		filePath := filepath.Join(cb.workspace, filename)
-		if data, err := os.ReadFile(filePath); err == nil {
-			result += fmt.Sprintf("## %s\n\n%s\n\n", filename, string(data))
+	// Other bootstrap files: just list paths so the agent can read_file on demand
+	referenceFiles := []struct {
+		name string
+		desc string
+	}{
+		{"AGENTS.md", "credential policies, model routing"},
+		{"USER.md", "user info, preferences, environment"},
+		{"IDENTITY.md", "bot identity and capabilities"},
+	}
+
+	var refs []string
+	for _, rf := range referenceFiles {
+		filePath := filepath.Join(cb.workspace, rf.name)
+		if _, err := os.Stat(filePath); err == nil {
+			refs = append(refs, fmt.Sprintf("- %s (%s)", filePath, rf.desc))
 		}
+	}
+	if len(refs) > 0 {
+		result += "## Reference Documents\nUse `read_file` to access these when needed:\n" + strings.Join(refs, "\n") + "\n\n"
 	}
 
 	return result

@@ -51,9 +51,10 @@ type LLMExecutor struct {
 	publisher     *bus.MessageBus      // nil = no progress publishing
 	planner       PlanGenerator        // nil = no plan generation
 	workspace     string
-	parallelTools bool              // Execute tool calls concurrently
-	mediaStore    media.MediaStore  // nil = no media pipeline
-	maxMediaSize  int64             // max bytes per media file; 0 = no limit
+	parallelTools      bool              // Execute tool calls concurrently
+	maxToolResultChars int               // Max chars to persist in session history (0 = unlimited)
+	mediaStore         media.MediaStore  // nil = no media pipeline
+	maxMediaSize       int64             // max bytes per media file; 0 = no limit
 	notifySwitch  func(channel, chatID string, event failover.SwitchEvent)
 }
 
