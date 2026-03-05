@@ -21,16 +21,27 @@ type SubagentTask struct {
 	Created       int64
 }
 
+// SubagentExecutor abstracts the LLM iteration loop for subagents.
+// Implementations can use the pipeline-based executor instead of RunToolLoop.
+type SubagentExecutor interface {
+	RunSubagent(ctx context.Context, messages []providers.Message, channel, chatID string) (content string, iterations int, err error)
+}
+
+// ExecutorFactory creates SubagentExecutor instances.
+// When set on SubagentManager, it replaces RunToolLoop calls.
+type ExecutorFactory func(tools *ToolRegistry, model string) SubagentExecutor
+
 type SubagentManager struct {
-	tasks         map[string]*SubagentTask
-	mu            sync.RWMutex
-	provider      providers.LLMProvider
-	defaultModel  string
-	bus           *bus.MessageBus
-	workspace     string
-	tools         *ToolRegistry
-	maxIterations int
-	nextID        int
+	tasks           map[string]*SubagentTask
+	mu              sync.RWMutex
+	provider        providers.LLMProvider
+	defaultModel    string
+	bus             *bus.MessageBus
+	workspace       string
+	tools           *ToolRegistry
+	maxIterations   int
+	nextID          int
+	executorFactory ExecutorFactory // nil = use legacy RunToolLoop
 }
 
 func NewSubagentManager(provider providers.LLMProvider, defaultModel, workspace string, bus *bus.MessageBus) *SubagentManager {
@@ -52,6 +63,14 @@ func (sm *SubagentManager) SetTools(tools *ToolRegistry) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.tools = tools
+}
+
+// SetExecutorFactory sets a factory that creates pipeline-based executors
+// for subagents. When set, RunToolLoop is no longer used.
+func (sm *SubagentManager) SetExecutorFactory(factory ExecutorFactory) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.executorFactory = factory
 }
 
 // RegisterTool registers a tool for subagent execution.
@@ -121,20 +140,37 @@ After completing the task, provide a clear summary of what was done.`
 
 	// Run tool loop with access to tools
 	sm.mu.RLock()
-	tools := sm.tools
+	smTools := sm.tools
 	maxIter := sm.maxIterations
+	factory := sm.executorFactory
 	sm.mu.RUnlock()
 
-	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
-		Provider:      sm.provider,
-		Model:         sm.defaultModel,
-		Tools:         tools,
-		MaxIterations: maxIter,
-		LLMOptions: map[string]any{
-			"max_tokens":  4096,
-			"temperature": 0.7,
-		},
-	}, messages, task.OriginChannel, task.OriginChatID)
+	var content string
+	var iterations int
+	var err error
+
+	if factory != nil {
+		// Use pipeline-based executor
+		executor := factory(smTools, sm.defaultModel)
+		content, iterations, err = executor.RunSubagent(ctx, messages, task.OriginChannel, task.OriginChatID)
+	} else {
+		// Legacy: use RunToolLoop
+		var loopResult *ToolLoopResult
+		loopResult, err = RunToolLoop(ctx, ToolLoopConfig{
+			Provider:      sm.provider,
+			Model:         sm.defaultModel,
+			Tools:         smTools,
+			MaxIterations: maxIter,
+			LLMOptions: map[string]any{
+				"max_tokens":  4096,
+				"temperature": 0.7,
+			},
+		}, messages, task.OriginChannel, task.OriginChatID)
+		if err == nil {
+			content = loopResult.Content
+			iterations = loopResult.Iterations
+		}
+	}
 
 	sm.mu.Lock()
 	var result *ToolResult
@@ -164,10 +200,10 @@ After completing the task, provide a clear summary of what was done.`
 		}
 	} else {
 		task.Status = "completed"
-		task.Result = loopResult.Content
+		task.Result = content
 		result = &ToolResult{
-			ForLLM:  fmt.Sprintf("Subagent '%s' completed (iterations: %d): %s", task.Label, loopResult.Iterations, loopResult.Content),
-			ForUser: loopResult.Content,
+			ForLLM:  fmt.Sprintf("Subagent '%s' completed (iterations: %d): %s", task.Label, iterations, content),
+			ForUser: content,
 			Silent:  false,
 			IsError: false,
 			Async:   false,
@@ -276,30 +312,45 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]interface{})
 		},
 	}
 
-	// Use RunToolLoop to execute with tools (same as async SpawnTool)
+	// Execute with tools using factory or legacy RunToolLoop
 	sm := t.manager
 	sm.mu.RLock()
-	tools := sm.tools
+	smTools := sm.tools
 	maxIter := sm.maxIterations
+	factory := sm.executorFactory
 	sm.mu.RUnlock()
 
-	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
-		Provider:      sm.provider,
-		Model:         sm.defaultModel,
-		Tools:         tools,
-		MaxIterations: maxIter,
-		LLMOptions: map[string]any{
-			"max_tokens":  4096,
-			"temperature": 0.7,
-		},
-	}, messages, t.originChannel, t.originChatID)
+	var content string
+	var iterations int
+	var err error
+
+	if factory != nil {
+		executor := factory(smTools, sm.defaultModel)
+		content, iterations, err = executor.RunSubagent(ctx, messages, t.originChannel, t.originChatID)
+	} else {
+		var loopResult *ToolLoopResult
+		loopResult, err = RunToolLoop(ctx, ToolLoopConfig{
+			Provider:      sm.provider,
+			Model:         sm.defaultModel,
+			Tools:         smTools,
+			MaxIterations: maxIter,
+			LLMOptions: map[string]any{
+				"max_tokens":  4096,
+				"temperature": 0.7,
+			},
+		}, messages, t.originChannel, t.originChatID)
+		if err == nil {
+			content = loopResult.Content
+			iterations = loopResult.Iterations
+		}
+	}
 
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)
 	}
 
 	// ForUser: Brief summary for user (truncated if too long)
-	userContent := loopResult.Content
+	userContent := content
 	maxUserLen := 500
 	if len(userContent) > maxUserLen {
 		userContent = userContent[:maxUserLen] + "..."
@@ -311,7 +362,7 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]interface{})
 		labelStr = "(unnamed)"
 	}
 	llmContent := fmt.Sprintf("Subagent task completed:\nLabel: %s\nIterations: %d\nResult: %s",
-		labelStr, loopResult.Iterations, loopResult.Content)
+		labelStr, iterations, content)
 
 	return &ToolResult{
 		ForLLM:  llmContent,

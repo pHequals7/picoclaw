@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/failover"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -391,6 +396,303 @@ func TestPipeline_StageError(t *testing.T) {
 	}
 	if len(executedStages) != 2 {
 		t.Errorf("expected 2 stages executed (s1 + s2 that errored), got %d", len(executedStages))
+	}
+}
+
+// --- Parallel tool execution tests ---
+
+// slowTool sleeps for a configured duration and records completion order.
+type slowTool struct {
+	name     string
+	delay    time.Duration
+	counter  *atomic.Int32
+	orderIdx int32 // set after execution
+}
+
+func (t *slowTool) Name() string        { return t.name }
+func (t *slowTool) Description() string  { return "slow tool for testing" }
+func (t *slowTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+}
+func (t *slowTool) Execute(ctx context.Context, args map[string]interface{}) *tools.ToolResult {
+	time.Sleep(t.delay)
+	if t.counter != nil {
+		t.orderIdx = t.counter.Add(1)
+	}
+	return tools.SilentResult(fmt.Sprintf("%s done", t.name))
+}
+
+func TestExecuteToolsStage_ParallelExecution(t *testing.T) {
+	// 3 tools each sleeping 50ms. Sequential = ~150ms. Parallel < 100ms.
+	counter := &atomic.Int32{}
+	registry := tools.NewToolRegistry()
+	registry.Register(&slowTool{name: "slow_a", delay: 50 * time.Millisecond, counter: counter})
+	registry.Register(&slowTool{name: "slow_b", delay: 50 * time.Millisecond, counter: counter})
+	registry.Register(&slowTool{name: "slow_c", delay: 50 * time.Millisecond, counter: counter})
+
+	stage := &ExecuteToolsStage{tools: registry, parallelTools: true}
+
+	sc := &StageContext{
+		Ctx: context.Background(),
+		Response: &providers.LLMResponse{
+			ToolCalls: []providers.ToolCall{
+				{Name: "slow_a", ID: "t1", Arguments: map[string]interface{}{}},
+				{Name: "slow_b", ID: "t2", Arguments: map[string]interface{}{}},
+				{Name: "slow_c", ID: "t3", Arguments: map[string]interface{}{}},
+			},
+		},
+		Messages:  []providers.Message{{Role: "user", Content: "go"}},
+		PlanState: newExecutionPlanState(),
+		Iteration: 1,
+		Opts:      processOptions{},
+	}
+
+	start := time.Now()
+	if err := stage.Execute(sc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed >= 120*time.Millisecond {
+		t.Errorf("parallel execution took %v, expected < 120ms", elapsed)
+	}
+	if counter.Load() != 3 {
+		t.Errorf("expected 3 tools executed, got %d", counter.Load())
+	}
+}
+
+func TestExecuteToolsStage_ParallelResultOrdering(t *testing.T) {
+	// Tools complete in different times but messages must appear in call order.
+	registry := tools.NewToolRegistry()
+	registry.Register(&slowTool{name: "fast", delay: 10 * time.Millisecond})
+	registry.Register(&slowTool{name: "medium", delay: 30 * time.Millisecond})
+	registry.Register(&slowTool{name: "slow", delay: 50 * time.Millisecond})
+
+	stage := &ExecuteToolsStage{tools: registry, parallelTools: true}
+
+	sc := &StageContext{
+		Ctx: context.Background(),
+		Response: &providers.LLMResponse{
+			ToolCalls: []providers.ToolCall{
+				{Name: "slow", ID: "t1", Arguments: map[string]interface{}{}},
+				{Name: "fast", ID: "t2", Arguments: map[string]interface{}{}},
+				{Name: "medium", ID: "t3", Arguments: map[string]interface{}{}},
+			},
+		},
+		Messages:  []providers.Message{{Role: "user", Content: "go"}},
+		PlanState: newExecutionPlanState(),
+		Iteration: 1,
+		Opts:      processOptions{},
+	}
+
+	if err := stage.Execute(sc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Messages: user, assistant, tool(t1), tool(t2), tool(t3)
+	toolMsgs := []providers.Message{}
+	for _, m := range sc.Messages {
+		if m.Role == "tool" {
+			toolMsgs = append(toolMsgs, m)
+		}
+	}
+	if len(toolMsgs) != 3 {
+		t.Fatalf("expected 3 tool result messages, got %d", len(toolMsgs))
+	}
+	// Verify order matches call order, not completion order
+	expectedIDs := []string{"t1", "t2", "t3"}
+	for i, m := range toolMsgs {
+		if m.ToolCallID != expectedIDs[i] {
+			t.Errorf("tool message %d: ToolCallID = %q, want %q", i, m.ToolCallID, expectedIDs[i])
+		}
+	}
+}
+
+func TestExecuteToolsStage_ParallelWithActionStream(t *testing.T) {
+	registry := tools.NewToolRegistry()
+	registry.Register(&slowTool{name: "tool_a", delay: 20 * time.Millisecond})
+	registry.Register(&slowTool{name: "tool_b", delay: 20 * time.Millisecond})
+
+	as := NewActionStream(config.VisibilityConfig{
+		Enabled:          true,
+		VerboseMode:      true, // Track all actions including internal
+		UpdateIntervalMS: 10,
+	}, func(summary string) {})
+
+	stage := &ExecuteToolsStage{tools: registry, parallelTools: true}
+
+	sc := &StageContext{
+		Ctx: context.Background(),
+		Response: &providers.LLMResponse{
+			ToolCalls: []providers.ToolCall{
+				{Name: "tool_a", ID: "a1", Arguments: map[string]interface{}{}},
+				{Name: "tool_b", ID: "b1", Arguments: map[string]interface{}{}},
+			},
+		},
+		Messages:  []providers.Message{{Role: "user", Content: "go"}},
+		PlanState: newExecutionPlanState(),
+		Iteration: 1,
+		Opts:      processOptions{ActionStream: as},
+	}
+
+	if err := stage.Execute(sc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Both actions should have been tracked
+	if as.GetActionCount() != 2 {
+		t.Errorf("expected 2 tracked actions, got %d", as.GetActionCount())
+	}
+}
+
+// errorTool returns an error result
+type errorTool struct{}
+
+func (t *errorTool) Name() string        { return "error_tool" }
+func (t *errorTool) Description() string  { return "always errors" }
+func (t *errorTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+}
+func (t *errorTool) Execute(ctx context.Context, args map[string]interface{}) *tools.ToolResult {
+	return tools.ErrorResult("tool failed").WithError(fmt.Errorf("tool failed"))
+}
+
+func TestExecuteToolsStage_ParallelToolError(t *testing.T) {
+	registry := tools.NewToolRegistry()
+	registry.Register(&slowTool{name: "good_tool", delay: 10 * time.Millisecond})
+	registry.Register(&errorTool{})
+
+	stage := &ExecuteToolsStage{tools: registry, parallelTools: true}
+
+	sc := &StageContext{
+		Ctx: context.Background(),
+		Response: &providers.LLMResponse{
+			ToolCalls: []providers.ToolCall{
+				{Name: "good_tool", ID: "t1", Arguments: map[string]interface{}{}},
+				{Name: "error_tool", ID: "t2", Arguments: map[string]interface{}{}},
+			},
+		},
+		Messages:  []providers.Message{{Role: "user", Content: "go"}},
+		PlanState: newExecutionPlanState(),
+		Iteration: 1,
+		Opts:      processOptions{},
+	}
+
+	// Should NOT return error - tool errors are captured in results
+	if err := stage.Execute(sc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	toolMsgs := []providers.Message{}
+	for _, m := range sc.Messages {
+		if m.Role == "tool" {
+			toolMsgs = append(toolMsgs, m)
+		}
+	}
+	if len(toolMsgs) != 2 {
+		t.Fatalf("expected 2 tool result messages, got %d", len(toolMsgs))
+	}
+
+	// First tool succeeds
+	if toolMsgs[0].Content != "good_tool done" {
+		t.Errorf("tool 1 content = %q, want 'good_tool done'", toolMsgs[0].Content)
+	}
+	// Second tool has error message
+	if toolMsgs[1].Content != "tool failed" {
+		t.Errorf("tool 2 content = %q, want 'tool failed'", toolMsgs[1].Content)
+	}
+}
+
+// --- Resolve media stage tests ---
+
+func TestResolveMediaStage_ResolvesRefs(t *testing.T) {
+	dir := t.TempDir()
+	// Write a file with PNG signature for MIME detection
+	pngSig := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	testFile := fmt.Sprintf("%s/test.png", dir)
+	if err := os.WriteFile(testFile, pngSig, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := media.NewFileMediaStore()
+	ref, err := store.Store(testFile, media.MediaMeta{
+		OriginalName: "test.png",
+		MIMEType:     "image/png",
+		Scope:        "turn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage := &ResolveMediaStage{maxMediaSize: 1024 * 1024}
+	sc := &StageContext{
+		MediaStore: store,
+		Messages: []providers.Message{
+			{
+				Role:    "user",
+				Content: "look at this",
+				Media: []providers.MediaImage{
+					{MimeType: ref}, // ref goes in MimeType as carrier
+				},
+			},
+		},
+	}
+
+	if err := stage.Execute(sc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mi := sc.Messages[0].Media[0]
+	if mi.MimeType != "image/png" {
+		t.Errorf("MimeType = %q, want image/png", mi.MimeType)
+	}
+	if mi.Base64Data == "" {
+		t.Error("Base64Data is empty after resolve")
+	}
+}
+
+func TestResolveMediaStage_SkipsWhenNoStore(t *testing.T) {
+	stage := &ResolveMediaStage{}
+	sc := &StageContext{
+		MediaStore: nil,
+		Messages: []providers.Message{
+			{Role: "user", Content: "hi", Media: []providers.MediaImage{{MimeType: "media://foo"}}},
+		},
+	}
+
+	if err := stage.Execute(sc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Media should be untouched
+	if sc.Messages[0].Media[0].MimeType != "media://foo" {
+		t.Error("media should be untouched when store is nil")
+	}
+}
+
+func TestResolveMediaStage_LargeFileRejected(t *testing.T) {
+	dir := t.TempDir()
+	testFile := fmt.Sprintf("%s/big.dat", dir)
+	if err := os.WriteFile(testFile, make([]byte, 200), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := media.NewFileMediaStore()
+	ref, _ := store.Store(testFile, media.MediaMeta{Scope: "turn"})
+
+	stage := &ResolveMediaStage{maxMediaSize: 50} // 50 bytes max
+	sc := &StageContext{
+		MediaStore: store,
+		Messages: []providers.Message{
+			{Role: "user", Media: []providers.MediaImage{{MimeType: ref}}},
+		},
+	}
+
+	// Should not error (graceful skip), but image should not be resolved
+	if err := stage.Execute(sc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sc.Messages[0].Media[0].Base64Data != "" {
+		t.Error("oversized file should not be encoded")
 	}
 }
 

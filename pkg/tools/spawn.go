@@ -45,6 +45,10 @@ func (t *SpawnTool) Parameters() map[string]interface{} {
 				"type":        "string",
 				"description": "Optional short label for the task (for display)",
 			},
+			"agent": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional agent instance ID to run this task (uses default if omitted)",
+			},
 		},
 		"required": []string{"task"},
 	}

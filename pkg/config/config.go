@@ -58,21 +58,37 @@ type Config struct {
 }
 
 type AgentsConfig struct {
-	Defaults AgentDefaults `json:"defaults"`
-	Failover AgentFailover `json:"failover"`
-	Planner  AgentPlanner  `json:"planner"`
+	Defaults  AgentDefaults      `json:"defaults"`
+	Failover  AgentFailover      `json:"failover"`
+	Planner   AgentPlanner       `json:"planner"`
+	Media     MediaConfig        `json:"media"`
+	Instances []AgentInstanceDef `json:"instances,omitempty"`
 }
 
 type AgentDefaults struct {
-	Workspace           string   `json:"workspace" env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
-	RestrictToWorkspace bool     `json:"restrict_to_workspace" env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
-	Provider            string   `json:"provider" env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
-	Model               string   `json:"model" env:"PICOCLAW_AGENTS_DEFAULTS_MODEL"`
-	MaxTokens           int      `json:"max_tokens" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
-	Temperature         float64  `json:"temperature" env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
-	MaxToolIterations   int      `json:"max_tool_iterations" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
-	FallbackModel       string   `json:"fallback_model" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODEL"`
-	FallbackModels      []string `json:"fallback_models" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODELS"`
+	Workspace              string   `json:"workspace" env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	RestrictToWorkspace    bool     `json:"restrict_to_workspace" env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
+	Provider               string   `json:"provider" env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
+	Model                  string   `json:"model" env:"PICOCLAW_AGENTS_DEFAULTS_MODEL"`
+	MaxTokens              int      `json:"max_tokens" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
+	Temperature            float64  `json:"temperature" env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
+	MaxToolIterations      int      `json:"max_tool_iterations" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	ParallelToolExecution  bool     `json:"parallel_tool_execution" env:"PICOCLAW_AGENTS_DEFAULTS_PARALLEL_TOOL_EXECUTION"`
+	FallbackModel          string   `json:"fallback_model" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODEL"`
+	FallbackModels         []string `json:"fallback_models" env:"PICOCLAW_AGENTS_DEFAULTS_FALLBACK_MODELS"`
+}
+
+type MediaConfig struct {
+	MaxMediaSizeMB int `json:"max_media_size_mb" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE_MB"`
+}
+
+type AgentInstanceDef struct {
+	ID                string   `json:"id"`
+	Model             string   `json:"model,omitempty"`
+	MaxIterations     int      `json:"max_iterations,omitempty"`
+	SystemPromptExtra string   `json:"system_prompt_extra,omitempty"`
+	AllowedTools      []string `json:"allowed_tools,omitempty"`
+	Workspace         string   `json:"workspace,omitempty"`
 }
 
 type AgentFailover struct {
@@ -286,13 +302,17 @@ func DefaultConfig() *Config {
 	return &Config{
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
-				Workspace:           "~/.picoclaw/workspace",
-				RestrictToWorkspace: true,
-				Provider:            "",
-				Model:               "glm-4.7",
-				MaxTokens:           8192,
-				Temperature:         0.7,
-				MaxToolIterations:   20,
+				Workspace:             "~/.picoclaw/workspace",
+				RestrictToWorkspace:   true,
+				Provider:              "",
+				Model:                 "glm-4.7",
+				MaxTokens:             8192,
+				Temperature:           0.7,
+				MaxToolIterations:     20,
+				ParallelToolExecution: true,
+			},
+			Media: MediaConfig{
+				MaxMediaSizeMB: 20,
 			},
 			Failover: AgentFailover{
 				Enabled:                      true,

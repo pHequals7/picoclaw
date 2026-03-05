@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/failover"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -28,6 +30,7 @@ type StageContext struct {
 	PlanState      *executionPlanState
 	ToolDefs       []providers.ToolDefinition
 	ActiveToolSet  *tools.ActiveToolSet
+	MediaStore     media.MediaStore // nil = no media pipeline
 	FinalContent   string
 	Iteration      int
 	Done           bool
@@ -297,11 +300,20 @@ func (s *AnnouncePlanStage) Execute(sc *StageContext) error {
 	return nil
 }
 
+// toolCallResult holds the result from a single tool execution.
+type toolCallResult struct {
+	toolResult *tools.ToolResult
+	actionID   string
+	tc         providers.ToolCall
+}
+
 // ExecuteToolsStage executes tool calls and appends results to messages.
+// When parallelTools is true, tool calls run concurrently via goroutines.
 type ExecuteToolsStage struct {
-	tools     *tools.ToolRegistry
-	sessions  SessionRecorder
-	publisher *bus.MessageBus
+	tools         *tools.ToolRegistry
+	sessions      SessionRecorder
+	publisher     *bus.MessageBus
+	parallelTools bool
 }
 
 func (s *ExecuteToolsStage) Name() string { return "execute_tools" }
@@ -329,9 +341,9 @@ func (s *ExecuteToolsStage) Execute(sc *StageContext) error {
 		s.sessions.AddFullMessage(sc.Opts.SessionKey, assistantMsg)
 	}
 
-	// Execute each tool call
+	// --- Sequential pre-phase: out-of-plan tool updates ---
+	// This modifies sc.PlanState and sc.Messages, which are NOT goroutine-safe.
 	for _, tc := range sc.Response.ToolCalls {
-		// Out-of-plan tool update
 		tcName := strings.TrimSpace(tc.Name)
 		if tcName == "" && tc.Function != nil {
 			tcName = strings.TrimSpace(tc.Function.Name)
@@ -356,7 +368,12 @@ func (s *ExecuteToolsStage) Execute(sc *StageContext) error {
 				Content: formatPlanContextMessage(sc.PlanState.Bullets),
 			})
 		}
+	}
 
+	// --- Start actions + log (sequential to preserve visual ordering) ---
+	toolCalls := sc.Response.ToolCalls
+	actionIDs := make([]string, len(toolCalls))
+	for i, tc := range toolCalls {
 		argsJSON, _ := json.Marshal(tc.Arguments)
 		argsPreview := utils.Truncate(string(argsJSON), 200)
 		logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
@@ -366,48 +383,90 @@ func (s *ExecuteToolsStage) Execute(sc *StageContext) error {
 				"correlation_id": sc.Opts.CorrelationID,
 			})
 
-		var actionID string
 		if sc.Opts.ActionStream != nil {
-			actionID = sc.Opts.ActionStream.StartAction(tc.Name, tc.Arguments)
+			actionIDs[i] = sc.Opts.ActionStream.StartAction(tc.Name, tc.Arguments)
 		}
+	}
 
-		asyncCallback := func(callbackCtx context.Context, result *tools.ToolResult) {
-			if !result.Silent && result.ForUser != "" {
-				logger.InfoCF("agent", "Async tool completed, agent will handle notification",
-					map[string]interface{}{
-						"tool":        tc.Name,
-						"content_len": len(result.ForUser),
-					})
+	// --- Execution phase ---
+	results := make([]toolCallResult, len(toolCalls))
+
+	if s.parallelTools && len(toolCalls) > 1 {
+		// Parallel execution
+		var wg sync.WaitGroup
+		wg.Add(len(toolCalls))
+		for i, tc := range toolCalls {
+			go func(idx int, tc providers.ToolCall) {
+				defer wg.Done()
+				asyncCallback := func(callbackCtx context.Context, result *tools.ToolResult) {
+					if !result.Silent && result.ForUser != "" {
+						logger.InfoCF("agent", "Async tool completed, agent will handle notification",
+							map[string]interface{}{
+								"tool":        tc.Name,
+								"content_len": len(result.ForUser),
+							})
+					}
+				}
+				tr := s.tools.ExecuteWithContext(sc.Ctx, tc.Name, tc.Arguments, sc.Opts.Channel, sc.Opts.ChatID, asyncCallback)
+
+				// CompleteAction is mutex-protected in ActionStream
+				if sc.Opts.ActionStream != nil && actionIDs[idx] != "" {
+					resultContent := tr.ForUser
+					if resultContent == "" {
+						resultContent = tr.ForLLM
+					}
+					sc.Opts.ActionStream.CompleteAction(actionIDs[idx], resultContent, tr.Err)
+				}
+
+				results[idx] = toolCallResult{toolResult: tr, actionID: actionIDs[idx], tc: tc}
+			}(i, tc)
+		}
+		wg.Wait()
+	} else {
+		// Sequential execution (single tool or parallel disabled)
+		for i, tc := range toolCalls {
+			asyncCallback := func(callbackCtx context.Context, result *tools.ToolResult) {
+				if !result.Silent && result.ForUser != "" {
+					logger.InfoCF("agent", "Async tool completed, agent will handle notification",
+						map[string]interface{}{
+							"tool":        tc.Name,
+							"content_len": len(result.ForUser),
+						})
+				}
 			}
-		}
+			tr := s.tools.ExecuteWithContext(sc.Ctx, tc.Name, tc.Arguments, sc.Opts.Channel, sc.Opts.ChatID, asyncCallback)
 
-		toolResult := s.tools.ExecuteWithContext(sc.Ctx, tc.Name, tc.Arguments, sc.Opts.Channel, sc.Opts.ChatID, asyncCallback)
-
-		if sc.Opts.ActionStream != nil && actionID != "" {
-			resultContent := toolResult.ForUser
-			if resultContent == "" {
-				resultContent = toolResult.ForLLM
+			if sc.Opts.ActionStream != nil && actionIDs[i] != "" {
+				resultContent := tr.ForUser
+				if resultContent == "" {
+					resultContent = tr.ForLLM
+				}
+				sc.Opts.ActionStream.CompleteAction(actionIDs[i], resultContent, tr.Err)
 			}
-			sc.Opts.ActionStream.CompleteAction(actionID, resultContent, toolResult.Err)
-		}
 
-		if !toolResult.Silent && toolResult.ForUser != "" && sc.Opts.SendResponse && s.publisher != nil {
+			results[i] = toolCallResult{toolResult: tr, actionID: actionIDs[i], tc: tc}
+		}
+	}
+
+	// --- Sequential post-phase: publish results and append messages ---
+	for _, r := range results {
+		if !r.toolResult.Silent && r.toolResult.ForUser != "" && sc.Opts.SendResponse && s.publisher != nil {
 			s.publisher.PublishOutbound(bus.OutboundMessage{
 				Channel: sc.Opts.Channel,
 				ChatID:  sc.Opts.ChatID,
-				Content: toolResult.ForUser,
+				Content: r.toolResult.ForUser,
 			})
 		}
 
-		contentForLLM := toolResult.ForLLM
-		if contentForLLM == "" && toolResult.Err != nil {
-			contentForLLM = toolResult.Err.Error()
+		contentForLLM := r.toolResult.ForLLM
+		if contentForLLM == "" && r.toolResult.Err != nil {
+			contentForLLM = r.toolResult.Err.Error()
 		}
 
 		toolResultMsg := providers.Message{
 			Role:       "tool",
 			Content:    contentForLLM,
-			ToolCallID: tc.ID,
+			ToolCallID: r.tc.ID,
 		}
 		sc.Messages = append(sc.Messages, toolResultMsg)
 
@@ -419,6 +478,58 @@ func (s *ExecuteToolsStage) Execute(sc *StageContext) error {
 	return nil
 }
 
+// ResolveMediaStage walks messages for media:// refs and inlines them as base64.
+// Inserted before CallLLMStage so the LLM sees resolved images.
+type ResolveMediaStage struct {
+	maxMediaSize int64 // max bytes per file; 0 = no limit
+}
+
+func (s *ResolveMediaStage) Name() string { return "resolve_media" }
+
+func (s *ResolveMediaStage) Execute(sc *StageContext) error {
+	if sc.MediaStore == nil {
+		return nil // no media pipeline configured
+	}
+
+	for i := range sc.Messages {
+		msg := &sc.Messages[i]
+		for j := range msg.Media {
+			mi := &msg.Media[j]
+			// Skip already-resolved images (have Base64Data)
+			if mi.Base64Data != "" {
+				continue
+			}
+			// Check for media:// ref in MimeType field (used as ref carrier)
+			if !strings.HasPrefix(mi.MimeType, "media://") {
+				continue
+			}
+			ref := mi.MimeType
+			localPath, meta, err := sc.MediaStore.ResolveWithMeta(ref)
+			if err != nil {
+				logger.WarnCF("agent", "Failed to resolve media ref",
+					map[string]interface{}{"ref": ref, "error": err.Error()})
+				continue
+			}
+
+			mimeType, b64, err := media.StreamEncodeFile(localPath, s.maxMediaSize)
+			if err != nil {
+				logger.WarnCF("agent", "Failed to encode media",
+					map[string]interface{}{"path": localPath, "error": err.Error()})
+				continue
+			}
+
+			// Override MIME with detected type, fallback to meta
+			if mimeType == "application/octet-stream" && meta.MIMEType != "" {
+				mimeType = meta.MIMEType
+			}
+
+			mi.MimeType = mimeType
+			mi.Base64Data = b64
+		}
+	}
+	return nil
+}
+
 // buildPipeline constructs the standard pipeline for the LLMExecutor.
 func (ex *LLMExecutor) buildPipeline() *Pipeline {
 	return &Pipeline{
@@ -427,6 +538,9 @@ func (ex *LLMExecutor) buildPipeline() *Pipeline {
 				defaultProvider: ex.provider,
 				defaultModel:    ex.model,
 				failover:        ex.failover,
+			},
+			&ResolveMediaStage{
+				maxMediaSize: ex.maxMediaSize,
 			},
 			&CallLLMStage{
 				failover:     ex.failover,
@@ -441,9 +555,10 @@ func (ex *LLMExecutor) buildPipeline() *Pipeline {
 				workspace: ex.workspace,
 			},
 			&ExecuteToolsStage{
-				tools:     ex.tools,
-				sessions:  ex.sessions,
-				publisher: ex.publisher,
+				tools:         ex.tools,
+				sessions:      ex.sessions,
+				publisher:     ex.publisher,
+				parallelTools: ex.parallelTools,
 			},
 		},
 	}

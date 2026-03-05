@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/failover"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/usage"
@@ -49,6 +51,9 @@ type LLMExecutor struct {
 	publisher     *bus.MessageBus      // nil = no progress publishing
 	planner       PlanGenerator        // nil = no plan generation
 	workspace     string
+	parallelTools bool              // Execute tool calls concurrently
+	mediaStore    media.MediaStore  // nil = no media pipeline
+	maxMediaSize  int64             // max bytes per media file; 0 = no limit
 	notifySwitch  func(channel, chatID string, event failover.SwitchEvent)
 }
 
@@ -73,6 +78,7 @@ func (ex *LLMExecutor) Run(ctx context.Context, messages []providers.Message, op
 		Opts:          opts,
 		PlanState:     newExecutionPlanState(),
 		ActiveToolSet: ex.activeToolSet,
+		MediaStore:    ex.mediaStore,
 	}
 
 	for i := 0; i < ex.maxIterations; i++ {
@@ -99,6 +105,19 @@ func (ex *LLMExecutor) Run(ctx context.Context, messages []providers.Message, op
 	}
 
 	return IterationResult{FinalContent: sc.FinalContent, Iterations: sc.Iteration}
+}
+
+// RunSubagent implements tools.SubagentExecutor, allowing the pipeline-based
+// executor to be used for subagent execution instead of RunToolLoop.
+func (ex *LLMExecutor) RunSubagent(ctx context.Context, messages []providers.Message, channel, chatID string) (string, int, error) {
+	opts := processOptions{
+		SessionKey:  fmt.Sprintf("subagent:%s:%s", channel, chatID),
+		Channel:     channel,
+		ChatID:      chatID,
+		SendResponse: false,
+	}
+	result := ex.Run(ctx, messages, opts)
+	return result.FinalContent, result.Iterations, result.Err
 }
 
 // --- Adapter implementations ---
