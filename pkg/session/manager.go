@@ -100,6 +100,66 @@ func (sm *SessionManager) GetHistory(key string) []providers.Message {
 	return history
 }
 
+// GetHistoryWithBudget returns the most recent messages that fit within the
+// given token budget. It walks backward from the newest message, estimating
+// tokens as rune_count/3. It respects message groups: tool results are kept
+// with their preceding assistant message (which contains the tool_calls).
+func (sm *SessionManager) GetHistoryWithBudget(key string, tokenBudget int) []providers.Message {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		return []providers.Message{}
+	}
+
+	msgs := session.Messages
+	if len(msgs) == 0 || tokenBudget <= 0 {
+		return []providers.Message{}
+	}
+
+	// Walk backward, accumulating token estimates
+	tokensUsed := 0
+	cutoff := len(msgs) // index of first message to include
+
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msgTokens := estimateMessageTokens(msgs[i])
+		if tokensUsed+msgTokens > tokenBudget && cutoff < len(msgs) {
+			break
+		}
+		tokensUsed += msgTokens
+		cutoff = i
+	}
+
+	// Don't start with orphaned tool results — walk forward past them
+	for cutoff < len(msgs) && msgs[cutoff].Role == "tool" {
+		cutoff++
+	}
+
+	if cutoff >= len(msgs) {
+		return []providers.Message{}
+	}
+
+	result := make([]providers.Message, len(msgs)-cutoff)
+	copy(result, msgs[cutoff:])
+	return result
+}
+
+// estimateMessageTokens estimates tokens for a single message using rune count / 3.
+func estimateMessageTokens(m providers.Message) int {
+	tokens := len([]rune(m.Content)) / 3
+	if tokens < 1 && m.Content != "" {
+		tokens = 1
+	}
+	// Account for tool call arguments
+	for _, tc := range m.ToolCalls {
+		if tc.Function != nil {
+			tokens += len([]rune(tc.Function.Arguments)) / 3
+		}
+	}
+	return tokens
+}
+
 func (sm *SessionManager) GetSummary(key string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()

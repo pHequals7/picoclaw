@@ -25,6 +25,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/failover"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
@@ -48,6 +49,8 @@ type AgentLoop struct {
 	usageStore     *usage.Store
 	config         *config.Config
 	executor       *LLMExecutor // Extracted LLM iteration loop
+	mediaStore     *media.FileMediaStore
+	agentRegistry  *AgentRegistry
 	running        atomic.Bool
 	summarizing    sync.Map // Tracks which sessions are currently being summarized
 	activeCancel   sync.Map // sessionKey -> context.CancelFunc for in-flight requests
@@ -169,6 +172,18 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	// Subagent doesn't need spawn/subagent tools to avoid recursion
 	subagentManager.SetTools(subagentTools)
 
+	// Wire pipeline-based executor factory for subagents (replaces RunToolLoop)
+	subagentManager.SetExecutorFactory(func(toolReg *tools.ToolRegistry, model string) tools.SubagentExecutor {
+		return &LLMExecutor{
+			provider:           provider,
+			model:              model,
+			maxIterations:      cfg.Agents.Defaults.MaxToolIterations,
+			tools:              toolReg,
+			parallelTools:      cfg.Agents.Defaults.ParallelToolExecution,
+			maxToolResultChars: cfg.Agents.Defaults.MaxToolResultChars,
+		}
+	})
+
 	// Register spawn tool (for main agent)
 	spawnTool := tools.NewSpawnTool(subagentManager)
 	toolsRegistry.Register(spawnTool)
@@ -192,6 +207,8 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 
 	usageStore := usage.NewStore(filepath.Join(workspace, "usage"))
 
+	mediaStore := media.NewFileMediaStore()
+
 	al := &AgentLoop{
 		bus:            msgBus,
 		provider:       provider,
@@ -206,6 +223,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		tools:          toolsRegistry,
 		usageStore:     usageStore,
 		config:         cfg,
+		mediaStore:     mediaStore,
 		summarizing:    sync.Map{},
 	}
 
@@ -227,6 +245,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	}
 
 	// Build the extracted LLM executor with adapter-based dependencies
+	maxMediaSize := int64(cfg.Agents.Media.MaxMediaSizeMB) * 1024 * 1024
 	al.executor = &LLMExecutor{
 		provider:      provider,
 		model:         cfg.Agents.Defaults.Model,
@@ -239,7 +258,89 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		publisher:     msgBus,
 		planner:       &plannerAdapter{al: al},
 		workspace:     workspace,
-		notifySwitch:  al.notifyFailoverSwitch,
+		parallelTools:      cfg.Agents.Defaults.ParallelToolExecution,
+		maxToolResultChars: cfg.Agents.Defaults.MaxToolResultChars,
+		mediaStore:         mediaStore,
+		maxMediaSize:       maxMediaSize,
+		notifySwitch:       al.notifyFailoverSwitch,
+	}
+
+	// Build agent registry
+	al.agentRegistry = NewAgentRegistry()
+
+	// Register default agent
+	defaultInstance := &AgentInstance{
+		ID:       "default",
+		Executor: al.executor,
+		Tools:    toolsRegistry,
+		MediaStore: mediaStore,
+		Config: AgentInstanceConfig{
+			ID:            "default",
+			Model:         cfg.Agents.Defaults.Model,
+			MaxIterations: cfg.Agents.Defaults.MaxToolIterations,
+			ParallelTools: cfg.Agents.Defaults.ParallelToolExecution,
+			MaxMediaSize:  maxMediaSize,
+		},
+	}
+	al.agentRegistry.Register(defaultInstance)
+	al.agentRegistry.SetDefault("default")
+
+	// Register additional agent instances from config
+	for _, instDef := range cfg.Agents.Instances {
+		if instDef.ID == "" || instDef.ID == "default" {
+			continue
+		}
+		instModel := instDef.Model
+		if instModel == "" {
+			instModel = cfg.Agents.Defaults.Model
+		}
+		instMaxIter := instDef.MaxIterations
+		if instMaxIter == 0 {
+			instMaxIter = cfg.Agents.Defaults.MaxToolIterations
+		}
+		instWorkspace := instDef.Workspace
+		if instWorkspace == "" {
+			instWorkspace = workspace
+		}
+
+		instTools := createToolRegistry(instWorkspace, restrict, cfg, msgBus)
+		instMediaStore := media.NewFileMediaStore()
+
+		instExecutor := &LLMExecutor{
+			provider:           provider,
+			model:              instModel,
+			maxIterations:      instMaxIter,
+			tools:              instTools,
+			parallelTools:      cfg.Agents.Defaults.ParallelToolExecution,
+			maxToolResultChars: cfg.Agents.Defaults.MaxToolResultChars,
+			mediaStore:         instMediaStore,
+			maxMediaSize:       maxMediaSize,
+			workspace:          instWorkspace,
+		}
+
+		inst := &AgentInstance{
+			ID:         instDef.ID,
+			Executor:   instExecutor,
+			Tools:      instTools,
+			MediaStore: instMediaStore,
+			Config: AgentInstanceConfig{
+				ID:                instDef.ID,
+				Model:             instModel,
+				MaxIterations:     instMaxIter,
+				SystemPromptExtra: instDef.SystemPromptExtra,
+				AllowedTools:      instDef.AllowedTools,
+				Workspace:         instWorkspace,
+				ParallelTools:     cfg.Agents.Defaults.ParallelToolExecution,
+				MaxMediaSize:      maxMediaSize,
+			},
+		}
+		al.agentRegistry.Register(inst)
+
+		logger.InfoCF("agent", "Registered agent instance",
+			map[string]interface{}{
+				"id":    instDef.ID,
+				"model": instModel,
+			})
 	}
 
 	return al
@@ -426,12 +527,20 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		actionStream = NewActionStream(al.config.Visibility, updateCallback)
 	}
 
+	// Resolve which agent should handle this message
+	agent, cleanedContent := al.resolveAgent(msg.Content)
+	sessionKey := msg.SessionKey
+	if agent != nil && agent.ID != "default" {
+		// Per-agent session namespacing
+		sessionKey = fmt.Sprintf("agent:%s:%s", agent.ID, msg.SessionKey)
+	}
+
 	// Process as user message
 	return al.runAgentLoop(ctx, processOptions{
-		SessionKey:           msg.SessionKey,
+		SessionKey:           sessionKey,
 		Channel:              msg.Channel,
 		ChatID:               msg.ChatID,
-		UserMessage:          msg.Content,
+		UserMessage:          cleanedContent,
 		DefaultResponse:      "I've completed processing but have no response to give.",
 		EnableSummary:        true,
 		SendResponse:         false,
@@ -688,6 +797,11 @@ func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMe
 // It handles context building, LLM calls, tool execution, and response handling.
 func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (string, error) {
 	defer al.cleanupTurnMedia(opts.Media)
+	defer func() {
+		if al.mediaStore != nil {
+			al.mediaStore.ReleaseScope("turn")
+		}
+	}()
 
 	// 0. Record last channel for heartbeat notifications (skip internal channels)
 	if opts.Channel != "" && opts.ChatID != "" {
@@ -707,7 +821,16 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 	var history []providers.Message
 	var summary string
 	if !opts.NoHistory {
-		history = al.sessions.GetHistory(opts.SessionKey)
+		budgetPct := al.config.Agents.Defaults.HistoryTokenBudgetPct
+		if budgetPct <= 0 {
+			budgetPct = 40
+		}
+		historyBudget := al.contextWindow * budgetPct / 100
+		if historyBudget > 0 {
+			history = al.sessions.GetHistoryWithBudget(opts.SessionKey, historyBudget)
+		} else {
+			history = al.sessions.GetHistory(opts.SessionKey)
+		}
 		summary = al.sessions.GetSummary(opts.SessionKey)
 	}
 	messages := al.contextBuilder.BuildMessages(
@@ -905,6 +1028,32 @@ func providerFromModel(model string) string {
 	}
 }
 
+// resolveAgent determines which agent instance should handle a message.
+// It checks for @agent-name prefix in the message content, falling back to default.
+// Returns the agent instance and the cleaned message content.
+func (al *AgentLoop) resolveAgent(content string) (*AgentInstance, string) {
+	trimmed := strings.TrimSpace(content)
+
+	// Check for @agent-name prefix
+	if strings.HasPrefix(trimmed, "@") {
+		spaceIdx := strings.IndexByte(trimmed, ' ')
+		if spaceIdx > 1 {
+			agentName := trimmed[1:spaceIdx]
+			if inst, ok := al.agentRegistry.Get(agentName); ok {
+				return inst, strings.TrimSpace(trimmed[spaceIdx+1:])
+			}
+		}
+	}
+
+	// Default agent
+	inst, err := al.agentRegistry.Default()
+	if err != nil {
+		// Should not happen; return nil and caller handles gracefully
+		return nil, content
+	}
+	return inst, content
+}
+
 // updateToolContexts updates the context for tools that need channel/chatID info.
 func (al *AgentLoop) updateToolContexts(channel, chatID string) {
 	// Use ContextualTool interface instead of type assertions
@@ -934,9 +1083,19 @@ func (al *AgentLoop) updateToolContexts(channel, chatID string) {
 func (al *AgentLoop) maybeSummarize(sessionKey string) {
 	newHistory := al.sessions.GetHistory(sessionKey)
 	tokenEstimate := al.estimateTokens(newHistory)
-	threshold := al.contextWindow * 75 / 100
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
+	thresholdPct := al.config.Agents.Defaults.SummarizeThresholdPct
+	if thresholdPct <= 0 {
+		thresholdPct = 30
+	}
+	threshold := al.contextWindow * thresholdPct / 100
+
+	msgCount := al.config.Agents.Defaults.SummarizeMessageCount
+	if msgCount <= 0 {
+		msgCount = 10
+	}
+
+	if len(newHistory) > msgCount || tokenEstimate > threshold {
 		if _, loading := al.summarizing.LoadOrStore(sessionKey, true); !loading {
 			go func() {
 				defer al.summarizing.Delete(sessionKey)
