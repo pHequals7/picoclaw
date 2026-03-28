@@ -55,6 +55,8 @@ type LLMExecutor struct {
 	maxToolResultChars int               // Max chars to persist in session history (0 = unlimited)
 	mediaStore         media.MediaStore  // nil = no media pipeline
 	maxMediaSize       int64             // max bytes per media file; 0 = no limit
+	maxTokens          int               // max tokens for LLM response; 0 = default 4096
+	temperature        float64           // sampling temperature
 	notifySwitch  func(channel, chatID string, event failover.SwitchEvent)
 }
 

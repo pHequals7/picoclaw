@@ -93,9 +93,26 @@ type CallLLMStage struct {
 	failover     FailoverRouter
 	tools        *tools.ToolRegistry
 	notifySwitch func(channel, chatID string, event failover.SwitchEvent)
+	maxTokens    int
+	temperature  float64
 }
 
 func (s *CallLLMStage) Name() string { return "call_llm" }
+
+func (s *CallLLMStage) llmOptions() map[string]interface{} {
+	mt := s.maxTokens
+	if mt <= 0 {
+		mt = 4096
+	}
+	temp := s.temperature
+	if temp <= 0 {
+		temp = 0.7
+	}
+	return map[string]interface{}{
+		"max_tokens":  mt,
+		"temperature": temp,
+	}
+}
 
 func (s *CallLLMStage) Execute(sc *StageContext) error {
 	if sc.ActiveToolSet != nil {
@@ -119,10 +136,7 @@ func (s *CallLLMStage) Execute(sc *StageContext) error {
 			"tools_json":    formatToolsForLog(sc.ToolDefs),
 		})
 
-	response, err := sc.ActiveProvider.Chat(sc.Ctx, sc.Messages, sc.ToolDefs, sc.ActiveModel, map[string]interface{}{
-		"max_tokens":  8192,
-		"temperature": 0.7,
-	})
+	response, err := sc.ActiveProvider.Chat(sc.Ctx, sc.Messages, sc.ToolDefs, sc.ActiveModel, s.llmOptions())
 
 	if err != nil {
 		var rateLimitErr *providers.RateLimitError
@@ -152,10 +166,7 @@ func (s *CallLLMStage) Execute(sc *StageContext) error {
 				sc.ActiveModel = retryRoute.Model
 				sc.SwitchEpoch = retryRoute.SwitchEpoch
 
-				response, err = sc.ActiveProvider.Chat(sc.Ctx, sc.Messages, sc.ToolDefs, sc.ActiveModel, map[string]interface{}{
-					"max_tokens":  8192,
-					"temperature": 0.7,
-				})
+				response, err = sc.ActiveProvider.Chat(sc.Ctx, sc.Messages, sc.ToolDefs, sc.ActiveModel, s.llmOptions())
 			}
 		}
 
@@ -559,6 +570,8 @@ func (ex *LLMExecutor) buildPipeline() *Pipeline {
 				failover:     ex.failover,
 				tools:        ex.tools,
 				notifySwitch: ex.notifySwitch,
+				maxTokens:    ex.maxTokens,
+				temperature:  ex.temperature,
 			},
 			&RecordUsageStage{usage: ex.usage},
 			&CheckCompletionStage{},

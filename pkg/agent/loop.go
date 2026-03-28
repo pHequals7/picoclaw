@@ -260,6 +260,8 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		workspace:     workspace,
 		parallelTools:      cfg.Agents.Defaults.ParallelToolExecution,
 		maxToolResultChars: cfg.Agents.Defaults.MaxToolResultChars,
+		maxTokens:          cfg.Agents.Defaults.MaxTokens,
+		temperature:        cfg.Agents.Defaults.Temperature,
 		mediaStore:         mediaStore,
 		maxMediaSize:       maxMediaSize,
 		notifySwitch:       al.notifyFailoverSwitch,
